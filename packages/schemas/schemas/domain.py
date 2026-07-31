@@ -55,7 +55,7 @@ class Segment(BaseModel):
     idx: int
     t_start: float
     t_end: float
-    frame_ptrs: list[str] = Field(default_factory=list)   # blob pointers
+    clip_blob: str | None = None                          # av clip pointer (video+audio)
     transcript: str | None = None                         # raw ASR
     summary: str | None = None
     base_attributes: list[Attribute] = Field(default_factory=list)

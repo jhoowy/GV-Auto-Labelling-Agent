@@ -32,7 +32,7 @@ class Segment(Base):
     idx: Mapped[int] = mapped_column(Integer)
     t_start: Mapped[float] = mapped_column(Float)
     t_end: Mapped[float] = mapped_column(Float)
-    frame_ptrs: Mapped[list] = mapped_column(JSONB, default=list)
+    clip_blob: Mapped[str | None] = mapped_column(String, nullable=True)
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_attributes: Mapped[list] = mapped_column(JSONB, default=list)

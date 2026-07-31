@@ -30,19 +30,21 @@ dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-# Monorepo: each source root is discovered independently so imports are flat
-# (import schemas, tools, models, ingestion, labelling, policy, backend, db).
-[tool.setuptools.packages.find]
-where = [
-    "packages/schemas",
-    "packages/tools",
-    "packages/models",
-    "ingestion",
-    "labelling",
-    "policy",
-    "app/backend",
-    "db",
-]
+# Monorepo: flat imports (import schemas, tools, models, ingestion, labelling,
+# policy, backend, db). Explicit package-dir mapping avoids the finder confusing
+# a source dir whose name matches its package (e.g. ingestion/ingestion).
+[tool.setuptools]
+packages = ["schemas", "tools", "models", "ingestion", "labelling", "policy", "backend", "db"]
+
+[tool.setuptools.package-dir]
+schemas = "packages/schemas/schemas"
+tools = "packages/tools/tools"
+models = "packages/models/models"
+ingestion = "ingestion/ingestion"
+labelling = "labelling/labelling"
+policy = "policy/policy"
+backend = "app/backend/backend"
+db = "db/db"
 
 [tool.ruff]
 line-length = 100
