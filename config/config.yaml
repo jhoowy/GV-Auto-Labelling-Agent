@@ -1,0 +1,29 @@
+# Base (profile-independent) configuration.
+# Per-role model providers live in config/profiles/<name>.yaml and are
+# selected by MODEL_PROFILE (see .env).
+
+ingestion:
+  # Fixed-length chunking.
+  segment_seconds: 30
+  frame_fps: 1
+
+labelling:
+  # Shot-window sequential processing.
+  window_size: 5            # shots visible per step
+  window_stride: 3          # shots committed per step (overlap = size - stride)
+  carry_over: rolling_summary
+
+retrieval:
+  # Hybrid = pgvector (dense) + BM25 (lexical).
+  hybrid_alpha: 0.5         # weight of dense vs lexical
+  precedent_top_k: 5        # find_similar_segments neighbours
+
+policy:
+  max_depth: 3              # Root -> {Rubric, Attribute, Edge}
+  categories: [gambling, bad_language, sex]
+  score_min: 0
+  score_max: 5
+
+consistency:
+  cross_sample_entropy_warn: 0.8
+  reproducibility_runs: 3

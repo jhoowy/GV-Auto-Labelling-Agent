@@ -1,0 +1,29 @@
+"""Policy + change-request queue endpoints."""
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from tools import policy_store
+
+router = APIRouter(prefix="/api", tags=["policy"])
+
+
+@router.get("/policies")
+def get_policy_tree(category: str):
+    return policy_store.get_policy_tree(category)
+
+
+@router.post("/policy-sets")
+def snapshot(note: str | None = None):
+    return policy_store.snapshot_policy_set(note)
+
+
+@router.get("/policy-change-requests")
+def list_queue(status: str = "queued"):
+    return policy_store.list_change_requests(status)
+
+
+@router.post("/policy-change-requests/{req_id}/resolve")
+def resolve(req_id: str, approve: bool):
+    policy_store.resolve_change_request(req_id, approve)
+    return {"req_id": req_id, "approved": approve}

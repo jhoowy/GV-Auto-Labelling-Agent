@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Data / blob store (never commit video binaries or extracted media)
+data/
+blobs/
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.mp3
+
+# Node / Next.js
+node_modules/
+app/ui/.next/
+app/ui/out/
+
+# Misc
+.DS_Store
+*.log

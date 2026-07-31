@@ -1,0 +1,35 @@
+# Default profile: proprietary providers. Each model role can independently
+# switch provider; a local-vLLM profile would mirror this file pointing at
+# OpenAI-compatible vLLM endpoints.
+
+# Vision + audio MLLM: produces summary + base_attributes. Recognises audio
+# directly (covers Bad Language); OCR is out of PoC scope.
+mllm:
+  provider: gemini
+  model: gemini-2.5-pro
+
+# Separate ASR model; transcript stored raw on the segment.
+asr:
+  provider: openai
+  model: whisper-1
+
+# Embeddings use dedicated single-modality models.
+text_embedding:
+  provider: openai
+  model: text-embedding-3-large
+  dim: 3072
+
+image_embedding:
+  provider: local
+  model: clip-vit-large
+  dim: 768
+
+# Agent reasoning LLM for the orchestrator.
+agent_llm:
+  provider: anthropic
+  model: claude-opus-4-8
+
+# Prompt module set for this profile.
+prompts:
+  ingestion: prompts/regular/ingestion
+  labelling: prompts/regular/labelling

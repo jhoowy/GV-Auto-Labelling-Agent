@@ -1,0 +1,52 @@
+[project]
+name = "video-labelling-iji"
+version = "0.1.0"
+description = "Agentic Auto-Labelling system for gameplay video content moderation (PoC)"
+requires-python = ">=3.11"
+dependencies = [
+    # Agent / orchestration
+    "langchain>=0.3",
+    "langgraph>=0.2",
+    # Backend
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    # Storage: Postgres + pgvector + BM25
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.3",
+    # Config
+    "pyyaml>=6.0",
+    # Ingestion helpers (video acquisition documented via yt-dlp only)
+    "yt-dlp>=2024.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Monorepo: each source root is discovered independently so imports are flat
+# (import schemas, tools, models, ingestion, labelling, policy, backend, db).
+[tool.setuptools.packages.find]
+where = [
+    "packages/schemas",
+    "packages/tools",
+    "packages/models",
+    "ingestion",
+    "labelling",
+    "policy",
+    "app/backend",
+    "db",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

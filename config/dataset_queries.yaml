@@ -1,0 +1,44 @@
+# Bootstrap dataset search queries (yt-dlp ytsearch).
+#
+# Rationale: searching category names ("gambling", "sexual content") surfaces
+# inappropriate/off-domain videos. Instead we search RECENT, POPULAR game
+# titles so the moderation categories (Gambling / Bad Language / Sex) arise
+# NATURALLY from real gameplay/review/stream content. The system assigns
+# categories later; queries do not force a balance.
+#
+# Focus: KRAFTON / NEXON titles + global M/18-rated titles. Gacha / probability
+# item content maps strongly to Gambling; bishoujo/narrative titles to Sex;
+# competitive FPS streams to Bad Language. Language mix ~50% Korean / 50% EN.
+#
+# `results_per_query` = N in ytsearchN.
+
+results_per_query: 10
+
+queries:
+  # --- KRAFTON (EN) ---
+  - "PUBG Battlegrounds stream highlights"
+  - "inZOI gameplay"
+
+  # --- NEXON / gacha & probability items -> Gambling (EN) ---
+  - "Blue Archive gacha pull"
+  - "MapleStory cube gambling"
+
+  # --- Global M/18-rated: violence + casino + language + nudity (EN) ---
+  - "GTA 6 gameplay"
+  - "GTA 5 diamond casino"
+  - "Cyberpunk 2077 gameplay"
+  - "Baldur's Gate 3 romance scene"
+  - "CS2 skin gambling"
+
+  # --- KRAFTON / NEXON (KO) ---
+  - "배틀그라운드 방송 하이라이트"
+  - "인조이 게임플레이"
+  - "블루 아카이브 가챠 뽑기"
+  - "메이플스토리 확률 뽑기"
+  - "던전앤파이터 플레이"
+  - "FC온라인 카드팩 뽑기"
+  - "서든어택 방송"
+
+  # --- Global titles, Korean streams (KO, profanity-rich) ---
+  - "GTA6 리뷰"
+  - "발로란트 욕설 하이라이트"
