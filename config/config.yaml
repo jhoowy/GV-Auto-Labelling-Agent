@@ -3,9 +3,10 @@
 # selected by MODEL_PROFILE (see .env).
 
 ingestion:
-  # Fixed-length chunking.
-  segment_seconds: 30
-  frame_fps: 1
+  asr_window_seconds: 30       # window size for ASR passes
+  # Omni scene segmentation windows (overlap + reconcile).
+  omni_window_seconds: 90
+  omni_overlap_seconds: 15
 
 labelling:
   # Shot-window sequential processing.
