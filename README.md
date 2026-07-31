@@ -88,3 +88,44 @@ PoC는 **YouTube에서 취득 가능한 영상**으로 한정한다. 저장소�
 역할별(mllm / asr / text_embedding / image_embedding / agent_llm) provider를 `config/profiles/<name>.yaml`
 에서 지정한다. 기본 profile은 proprietary API(OpenAI/Gemini/Claude)이며, 실험 시 local vLLM
 엔드포인트를 가리키는 profile로 교체한다. 코드 변경 없이 config로 전환.
+
+### Local model profile
+로컬 vLLM 가중치로 ingestion을 돌리려면:
+
+```bash
+cp config/profiles/local.example.yaml config/profiles/local.yaml
+# local.yaml 을 열어 각 model_path 를 실제 가중치 디렉토리로 채운다
+export MODEL_PROFILE=local
+```
+
+`local.yaml` 은 **git 에 추적되지 않는다** — 각자 환경의 모델 경로를 직접 입력한다.
+`local.example.yaml` 의 주석이 각 역할(ASR / Omni MLLM / text embedding / visual embedding)을 설명한다.
+
+### FlashAttention (vLLM 서빙)
+vLLM 서빙에는 FlashAttention 이 필요하다. wheel 은 torch/CUDA/Python 조합마다 다르므로
+`pyproject.toml` 에 넣지 않는다 — **각자 환경에 맞는 pre-built wheel 을 직접 설치**한다.
+
+```bash
+# 1. 내 환경 버전 확인
+python -c "import torch,sys; print(torch.__version__, torch.version.cuda, f'cp{sys.version_info.major}{sys.version_info.minor}')"
+
+# 2. 아래 릴리스에서 torch/cuda/cp 조합에 맞는 wheel URL 을 찾아 설치
+#    https://github.com/mjun0812/flash-attention-prebuild-wheels/releases
+pip install <matching-wheel-url>
+```
+
+그다음 `bash scripts/serve_vllm.sh` 로 Agent 단계 모델 서버(Omni/text-embed/visual-embed)를
+띄운다 (GPU/포트 배치는 스크립트 참고).
+
+### ASR + 정렬 서버 (별도 venv)
+ingestion의 ASR(Qwen3-ASR)+ForcedAligner는 `vllm==0.14` 를 핀하므로, 메인 venv(vllm 0.26)와
+**반드시 분리**한다. 같은 venv에 깔면 vllm/torch가 다운그레이드되어 다른 서버가 깨진다.
+
+```bash
+uv venv /tmp/iji-qwen-asr-venv --python 3.12
+uv pip install --python /tmp/iji-qwen-asr-venv/bin/python "qwen-asr[vllm]" fastapi "uvicorn[standard]"
+bash scripts/serve_asr.sh          # word-level timestamps, :8810 (GPU1)
+```
+
+ingestion은 이 서버(:8810)를 HTTP로 호출해 word-level ASR(utterances)만 만든다. clip/summary/
+embedding은 이후 labelling agent 단계에서 생성한다.

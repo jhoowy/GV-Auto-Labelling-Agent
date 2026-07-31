@@ -25,6 +25,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+# Local vLLM model serving (GPU, single-node ingestion). Not needed when using
+# proprietary API providers. Install with: pip install -e ".[serving]"
+# FlashAttention is installed separately from an env-specific prebuilt wheel
+# (see README) — intentionally not pinned here.
+serving = ["vllm[audio]>=0.26"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -6,6 +6,7 @@ from .domain import (
     PolicyChangeRequest,
     PolicySet,
     Segment,
+    Utterance,
     Video,
     VideoMetadata,
 )
@@ -21,7 +22,7 @@ from .enums import (
 
 __all__ = [
     "Attribute", "Label", "Policy", "PolicyChangeRequest", "PolicySet",
-    "Segment", "Video", "VideoMetadata",
+    "Segment", "Utterance", "Video", "VideoMetadata",
     "AttributeLayer", "Category", "ChangeRequestStatus", "PolicyType",
     "VideoStatus", "SCORE_MIN", "SCORE_MAX",
 ]

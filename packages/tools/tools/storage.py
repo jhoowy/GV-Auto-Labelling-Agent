@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from db import SessionLocal
 from db import models as m
-from schemas import Attribute, Label, Segment, Video, VideoMetadata
+from schemas import Attribute, Label, Segment, Utterance, Video, VideoMetadata
 from schemas.enums import VideoStatus
 
 
@@ -81,6 +81,25 @@ def get_segments(video_id: str) -> list[Segment]:
             )
             for o in objs
         ]
+
+
+def replace_utterances(video_id: str, utterances: list[Utterance]) -> None:
+    """Replace a video's word-level ASR utterances (ingestion output)."""
+    with SessionLocal() as s:
+        s.query(m.Utterance).filter_by(video_id=video_id).delete()
+        for u in utterances:
+            s.add(m.Utterance(video_id=u.video_id, idx=u.idx,
+                              t_start=u.t_start, t_end=u.t_end, text=u.text))
+        s.commit()
+
+
+def get_utterances(video_id: str) -> list[Utterance]:
+    """Word-level utterances on the video timeline, ordered by idx."""
+    with SessionLocal() as s:
+        objs = (s.query(m.Utterance).filter_by(video_id=video_id)
+                .order_by(m.Utterance.idx).all())
+        return [Utterance(video_id=o.video_id, idx=o.idx, t_start=o.t_start,
+                          t_end=o.t_end, text=o.text) for o in objs]
 
 
 def save_label(label: Label) -> None:

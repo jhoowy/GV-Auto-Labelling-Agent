@@ -25,7 +25,7 @@ def upgrade() -> None:
     sa.Column('version', sa.Integer(), nullable=False),
     sa.Column('parent_id', sa.String(), nullable=True),
     sa.Column('text', sa.Text(), nullable=False),
-    sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=3072), nullable=True),
+    sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=2560), nullable=True),
     sa.Column('structured_ref', sa.String(), nullable=True),
     sa.Column('status', sa.String(), nullable=False),
     sa.PrimaryKeyConstraint('policy_id')
@@ -54,7 +54,7 @@ def upgrade() -> None:
     sa.Column('source_blob', sa.String(), nullable=True),
     sa.Column('global_overview', sa.Text(), nullable=True),
     sa.Column('status', sa.String(), nullable=False),
-    sa.Column('text_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=3072), nullable=True),
+    sa.Column('text_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=2560), nullable=True),
     sa.PrimaryKeyConstraint('video_id')
     )
     op.create_table('segments',
@@ -67,8 +67,8 @@ def upgrade() -> None:
     sa.Column('transcript', sa.Text(), nullable=True),
     sa.Column('summary', sa.Text(), nullable=True),
     sa.Column('base_attributes', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-    sa.Column('text_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=3072), nullable=True),
-    sa.Column('image_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=768), nullable=True),
+    sa.Column('text_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=2560), nullable=True),
+    sa.Column('image_embedding', pgvector.sqlalchemy.vector.VECTOR(dim=2048), nullable=True),
     sa.Column('status', sa.String(), nullable=False),
     sa.ForeignKeyConstraint(['video_id'], ['videos.video_id'], ),
     sa.PrimaryKeyConstraint('segment_id')

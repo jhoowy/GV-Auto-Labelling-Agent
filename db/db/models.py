@@ -1,8 +1,8 @@
 """SQLAlchemy models = the physical schema, managed via Alembic.
 
 Embeddings use pgvector; large media are pointers. Full-text/BM25 is served by
-tsvector indexes added in migrations. Embedding dims match config/profiles
-(text=3072, image=768) — adjust per profile.
+tsvector indexes added in migrations. Embedding dims match the active profile's
+models: text = 2560 (Qwen3-Embedding-4B), visual = 2048 (Qwen3-VL-Embedding-2B).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class Video(Base):
     source_blob: Mapped[str | None] = mapped_column(String, nullable=True)
     global_overview: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
-    text_embedding: Mapped[list[float] | None] = mapped_column(Vector(3072), nullable=True)
+    text_embedding: Mapped[list[float] | None] = mapped_column(Vector(2560), nullable=True)
 
 
 class Segment(Base):
@@ -36,9 +36,19 @@ class Segment(Base):
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     base_attributes: Mapped[list] = mapped_column(JSONB, default=list)
-    text_embedding: Mapped[list[float] | None] = mapped_column(Vector(3072), nullable=True)
-    image_embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
+    text_embedding: Mapped[list[float] | None] = mapped_column(Vector(2560), nullable=True)
+    image_embedding: Mapped[list[float] | None] = mapped_column(Vector(2048), nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
+
+
+class Utterance(Base):
+    __tablename__ = "utterances"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.video_id"), index=True)
+    idx: Mapped[int] = mapped_column(Integer)
+    t_start: Mapped[float] = mapped_column(Float)
+    t_end: Mapped[float] = mapped_column(Float)
+    text: Mapped[str] = mapped_column(Text)
 
 
 class Label(Base):
@@ -64,7 +74,7 @@ class Policy(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     text: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(3072), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(2560), nullable=True)
     structured_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
 

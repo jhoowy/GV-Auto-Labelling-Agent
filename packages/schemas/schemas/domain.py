@@ -64,6 +64,18 @@ class Segment(BaseModel):
     status: str = "pending"
 
 
+class Utterance(BaseModel):
+    """One word-level ASR unit (ForcedAligner output) on the video timeline.
+    Produced by ingestion; the agent merges those overlapping a refined segment
+    into that segment's ASR attribute."""
+
+    video_id: str
+    idx: int
+    t_start: float
+    t_end: float
+    text: str
+
+
 class Label(BaseModel):
     """Per-segment moderation judgement with its full trace."""
 

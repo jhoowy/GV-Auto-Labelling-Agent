@@ -1,0 +1,30 @@
+# Local vLLM model profile (template).
+#
+# Copy this file to `local.yaml` (which is git-excluded) and replace each
+# `model_path` with the real local weights directory on your machine. Select
+# this profile with MODEL_PROFILE=local.
+#
+# `base_url` / `served_model_name` must match scripts/serve_vllm.sh (ports).
+# Ingestion serves these models via vLLM with FlashAttention.
+
+asr:                # audio -> transcript + word timestamps (isolated qwen-asr server)
+  model_path: /path/to/Qwen3-ASR-1.7B
+  base_url: http://localhost:8810
+
+aligner:            # used by the asr server (forced alignment weights)
+  model_path: /path/to/Qwen3-ForcedAligner-0.6B
+
+mllm:               # clip (vision + audio) -> summary
+  model_path: /path/to/Qwen3-Omni-30B-A3B-Instruct
+  base_url: http://localhost:8801/v1
+  served_model_name: omni
+
+text_embedding:     # ASR + summary -> segment & global text embedding
+  model_path: /path/to/Qwen3-Embedding-4B
+  base_url: http://localhost:8803/v1
+  served_model_name: text-embed
+
+image_embedding:    # clip -> visual (video) embedding
+  model_path: /path/to/Qwen3-VL-Embedding-2B
+  base_url: http://localhost:8804/v1
+  served_model_name: visual-embed
