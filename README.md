@@ -12,39 +12,27 @@ PoC 범위: PEGI 하위 **Gambling / Bad Language / Sex** 3개 카테고리, 연
 flowchart TB
   IDS(["YouTube video IDs"])
 
-  subgraph ING["INGESTION · fixed MLLM batch (no agent)"]
-    direction LR
-    F["fetch (yt-dlp)"] --> S["shot segmentation (Omni)"] --> A["ASR transcript"]
-    A --> C["coarse summary + base_attributes"] --> E["embed (text | image)"]
-  end
+  ING["INGESTION<br/>fixed MLLM batch — no agent"]
+  LAB["LABELLING AGENT<br/>LangGraph state machine"]
+  POL["POLICY<br/>versioned node tree + bootstrap"]
+  SVC["SERVICE LAYER<br/>packages/tools"]
+  API["FastAPI backend"]
+  UI["Next.js operator UI"]
 
-  STORE[("STORAGE · data warehouse<br/>Postgres + pgvector (dense) + BM25 (lexical)<br/>blobs → FS / MinIO (DB holds pointers)")]
+  PG[("Postgres<br/>relational · pgvector · BM25")]
+  BLOB[("Blob store<br/>media · clips · thumbnails")]
 
-  subgraph LAB["LABELLING AGENT · LangGraph"]
-    direction TB
-    STG["shot-window state machine:<br/>LOAD → RETRIEVE → JUDGE → SIDE_FX → COMMIT"]
-    TLS["tools: search_policies · find_similar_segments (precedent)<br/>· get_frames / expand_frames · lookup_structured<br/>· revise_ingestion (auto+log) · propose_policy_change (→queue) · emit_label"]
-    STG -.-> TLS
-  end
-
-  subgraph POL["POLICY layer"]
-    direction TB
-    PT["versioned node tree (Rubric / Attribute / Edge) + set snapshot"]
-    PQ["change-request queue · bootstrap (PEGI seed → v1)"]
-  end
-
-  subgraph SVC["SERVICE LAYER (packages/tools) · one impl, two callers"]
-    direction TB
-    API["FastAPI (app/backend) → Next.js UI: Data Viewer · Monitoring · Policy"]
-    AT["LangGraph agent tools (same functions, no duplication)"]
-  end
-
-  IDS --> ING --> STORE
-  STORE --> LAB
-  LAB <-->|"policy RAG"| POL
-  LAB -->|"emits Label + full trace:<br/>score · rationale · cited policies · evidence · used_segments · tool_trace"| STORE
-  STORE --> SVC
+  IDS --> ING
+  ING --> PG & BLOB
+  PG & BLOB --> LAB
+  LAB -->|"labels + trace"| PG
+  LAB <-->|"policy RAG + precedents"| POL
+  PG --> SVC
+  POL --> SVC
+  SVC --> API --> UI
 ```
+
+<sub>Detail lives in the docs: ingestion → [DATA_FLOW](docs/DATA_FLOW.md), the agent stages/tools → [AGENT_WORKFLOW](docs/AGENT_WORKFLOW.md), the whole system → [ARCHITECTURE](docs/ARCHITECTURE.md).</sub>
 
 ## Documentation
 
