@@ -88,6 +88,7 @@ const TYPE_TONE: Record<string, "default" | "gray" | "warn"> = {
   scoring: "default",
   attribute: "gray",
   edge_case: "warn",
+  decision_rule: "default",
 };
 
 const TYPE_GROUPS: { type: string; label: string }[] = [
@@ -98,7 +99,9 @@ const TYPE_GROUPS: { type: string; label: string }[] = [
 
 function PolicyTreeSection({ category }: { category: Category }) {
   const { data, loading, error } = useAsync(() => getPolicies(category), [category]);
-  const roots = normalizeTree(data ?? []);
+  const flat = data ?? [];
+  const roots = normalizeTree(flat);
+  const decisionNode = flat.find((n) => n.type === "decision_rule") ?? null;
   return (
     <section>
       <h2>Policy tree — {categoryLabel(category)}</h2>
@@ -130,8 +133,136 @@ function PolicyTreeSection({ category }: { category: Category }) {
               <PolicyNode key={n.policy_id} node={n} depth={0} />
             ))}
         </div>
+        <DecisionRuleTree node={decisionNode} />
       </AsyncState>
     </section>
+  );
+}
+
+// Readable render of a policy node's structured_data payload. Supports the
+// attribute_def and (legacy) term_levels shapes; decision_tree is rendered by
+// its own section, so only a hint is shown here.
+function StructuredData({ sd }: { sd: any }) {
+  if (!sd || typeof sd !== "object") return null;
+
+  if (sd.kind === "attribute_def") {
+    const values: unknown[] = Array.isArray(sd.values) ? sd.values : [];
+    const scores: unknown[] = Array.isArray(sd.scores_informed)
+      ? sd.scores_informed
+      : [];
+    const examples: unknown[] = Array.isArray(sd.examples) ? sd.examples : [];
+    return (
+      <div className="grid" style={{ gap: 4, marginTop: 8 }}>
+        <div className="row">
+          <span className="muted small">value_type</span>
+          <Badge tone="gray">{String(sd.value_type ?? "—")}</Badge>
+        </div>
+        {values.length > 0 && (
+          <div className="small">
+            <span className="muted">values: </span>
+            <span className="mono">{values.map((v) => String(v)).join(", ")}</span>
+          </div>
+        )}
+        {sd.guidelines && (
+          <div className="small">
+            <span className="muted">guidelines: </span>
+            {String(sd.guidelines)}
+          </div>
+        )}
+        {scores.length > 0 && (
+          <div className="small">
+            <span className="muted">informs scores: </span>
+            <span className="mono">{scores.map((v) => String(v)).join(", ")}</span>
+          </div>
+        )}
+        {examples.length > 0 && (
+          <div className="small">
+            <span className="muted">examples: </span>
+            {examples.map((v) => String(v)).join("; ")}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (sd.kind === "term_levels" && sd.levels && typeof sd.levels === "object") {
+    const levels = Object.entries(sd.levels as Record<string, unknown[]>);
+    return (
+      <div className="grid" style={{ gap: 4, marginTop: 8 }}>
+        <div className="muted small">term levels (score → terms)</div>
+        {levels.map(([lvl, terms]) => (
+          <div key={lvl} className="small">
+            <Badge tone="gray">L{lvl}</Badge>{" "}
+            <span className="mono">
+              {(Array.isArray(terms) ? terms : []).map((t) => String(t)).join(", ")}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// Renders a category's DECISION_RULE node: an ordered list of rules, each a set
+// of `when` conditions -> score (with an optional note), plus the default.
+function DecisionRuleTree({ node }: { node: Policy | null }) {
+  const sd = node?.structured_data;
+  if (!node || !sd || sd.kind !== "decision_tree") return null;
+  const rules: any[] = Array.isArray(sd.rules) ? sd.rules : [];
+  return (
+    <div style={{ marginTop: 16 }}>
+      <h3>Decision rule tree</h3>
+      <div className="card">
+        <div className="row spread">
+          <span className="mono small">{node.policy_id}</span>
+          <span className="muted small">v{node.version}</span>
+        </div>
+        <div className="grid" style={{ gap: 8, marginTop: 8 }}>
+          {rules.length === 0 && (
+            <div className="muted small">No rules defined.</div>
+          )}
+          {rules.map((r, i) => {
+            const conds: any[] = Array.isArray(r?.when) ? r.when : [];
+            return (
+              <div key={i} className="card" style={{ padding: 8 }}>
+                <div className="row spread">
+                  <span className="muted small">rule #{i + 1}</span>
+                  <Badge tone="default">score {String(r?.score ?? "—")}</Badge>
+                </div>
+                <div className="small" style={{ marginTop: 4 }}>
+                  <span className="muted">when: </span>
+                  {conds.length === 0 ? (
+                    <span className="muted">always</span>
+                  ) : (
+                    <span className="mono">
+                      {conds
+                        .map(
+                          (c) =>
+                            `${c?.attribute} ${c?.op}` +
+                            (c?.value !== undefined
+                              ? ` ${JSON.stringify(c.value)}`
+                              : ""),
+                        )
+                        .join("  AND  ")}
+                    </span>
+                  )}
+                </div>
+                {r?.note && (
+                  <div className="small muted" style={{ marginTop: 4 }}>
+                    {String(r.note)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div className="small muted">
+            default score: <span className="mono">{String(sd.default ?? 0)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -148,6 +279,7 @@ function PolicyNode({ node, depth }: { node: Policy; depth: number }) {
           <Badge tone={node.status === "active" ? "ok" : "gray"}>{node.status}</Badge>
         </div>
         <p style={{ margin: "8px 0 0" }}>{node.text}</p>
+        {node.type === "attribute" && <StructuredData sd={node.structured_data} />}
         {node.structured_ref && (
           <div className="muted small mono">structured_ref: {node.structured_ref}</div>
         )}
@@ -224,6 +356,11 @@ function ChangeRequestCard({
         <span className="mono small">{req.req_id}</span>
         <Badge tone="gray">{req.status}</Badge>
       </div>
+      {req.target_policy_id && (
+        <div className="small muted" style={{ marginTop: 4 }}>
+          Targets: <span className="mono">{req.target_policy_id}</span>
+        </div>
+      )}
       <div style={{ marginTop: 8 }}>
         <div className="muted small">Proposed change</div>
         <p style={{ margin: "2px 0" }}>{req.proposed_change}</p>

@@ -143,15 +143,36 @@ def revise_ingestion(segment_id: str, patch: dict) -> None:
 
 def propose_policy_change(change: str, rationale: str, affected: list[str],
                           category: str | None = None,
-                          node_type: str | None = None) -> None:
+                          node_type: str | None = None,
+                          target_policy_id: str | None = None) -> None:
     """Always queued for human approval; never auto-applied. category/node_type
-    let an approver materialise the proposal into a policy node."""
+    let an approver materialise the proposal into a policy node;
+    target_policy_id names an existing node the change edits (if any)."""
     from tools import policy_store
     policy_store.enqueue_change_request(
         PolicyChangeRequest(req_id="", proposed_change=change, rationale=rationale,
                             category=category, node_type=node_type,
+                            target_policy_id=target_policy_id,
                             affected_segments=affected)
     )
+
+
+def define_attribute_definition(category: str, name: str, value_type: str,
+                                guidelines: str, scores_informed: list[int],
+                                values: list | None = None,
+                                examples: list | None = None):
+    """Bootstrap/redesign skill: draft/edit an ATTRIBUTE *definition* node
+    (schema + detection guidelines). Directly upserts; not wired into JUDGE."""
+    from tools import policy_store
+    return policy_store.upsert_attribute_definition(
+        category, name, value_type, guidelines, scores_informed, values, examples)
+
+
+def define_decision_rule(category: str, rules: list[dict], default: int = 0):
+    """Bootstrap/redesign skill: draft/edit the category's DECISION_RULE node
+    (attribute-based decision tree). Directly upserts; not wired into JUDGE."""
+    from tools import policy_store
+    return policy_store.upsert_decision_rule(category, rules, default)
 
 
 def emit_label(label: Label) -> None:

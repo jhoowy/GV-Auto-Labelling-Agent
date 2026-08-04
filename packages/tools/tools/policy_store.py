@@ -67,6 +67,7 @@ def _req_to_schema(o: "m.PolicyChangeRequest") -> PolicyChangeRequest:
         rationale=o.rationale,
         category=o.category,
         node_type=o.node_type,
+        target_policy_id=o.target_policy_id,
         affected_segments=list(o.affected_segments or []),
         similar_policies=list(o.similar_policies or []),
         status=ChangeRequestStatus(o.status),
@@ -179,6 +180,76 @@ def upsert_structured_attribute(
     ))
 
 
+def upsert_attribute_definition(
+    category: str,
+    name: str,
+    value_type: str,
+    guidelines: str,
+    scores_informed: list[int],
+    values: list | None = None,
+    examples: list | None = None,
+) -> Policy:
+    """Create/edit an ATTRIBUTE node holding an attribute *definition*.
+
+    The node id is deterministic (`<category>.attr.<name>`), parented under the
+    scoring rubric. `value_type` is one of boolean/categorical/level/count;
+    `values` enumerates the allowed values for categorical/level types.
+    `guidelines` describe how to detect the attribute from a shot;
+    `scores_informed` are the PEGI score bands this attribute is evidence for.
+    Reuses the versioned upsert path (bump + history)."""
+    cat = getattr(category, "value", category)
+    scores = [int(s) for s in scores_informed]
+    text = (
+        f"Attribute '{name}' ({value_type}) for {cat}. {guidelines} "
+        f"Informs scores: {', '.join(str(s) for s in scores) or 'none'}."
+    )
+    return upsert_policy(Policy(
+        policy_id=f"{cat}.attr.{name}",
+        type=PolicyType.ATTRIBUTE,
+        category=Category(cat),
+        parent_id=f"{cat}.scoring",
+        text=text,
+        structured_data={
+            "kind": "attribute_def",
+            "value_type": value_type,
+            "values": values,
+            "guidelines": guidelines,
+            "scores_informed": scores,
+            "examples": examples or [],
+        },
+    ))
+
+
+def upsert_decision_rule(
+    category: str,
+    rules: list[dict],
+    default: int = 0,
+) -> Policy:
+    """Create/edit the category's DECISION_RULE node — a priority-ordered,
+    attribute-based decision tree. The node id is deterministic
+    (`<category>.rules`), parented under the scoring rubric. `rules` are
+    evaluated in order; the first fully-matching rule's `score` wins, else
+    `default`. Reuses the versioned upsert path (bump + history)."""
+    cat = getattr(category, "value", category)
+    text = (
+        f"Decision rule tree for {cat}: {len(rules)} priority-ordered rule(s) "
+        f"over policy attributes; first fully-matching rule wins, else default "
+        f"score {int(default)}. The rules live in structured_data."
+    )
+    return upsert_policy(Policy(
+        policy_id=f"{cat}.rules",
+        type=PolicyType.DECISION_RULE,
+        category=Category(cat),
+        parent_id=f"{cat}.scoring",
+        text=text,
+        structured_data={
+            "kind": "decision_tree",
+            "default": int(default),
+            "rules": list(rules),
+        },
+    ))
+
+
 def snapshot_policy_set(note: str | None = None) -> PolicySet:
     """Tag the whole active tree as policy-set vN.
 
@@ -237,6 +308,7 @@ def enqueue_change_request(req: PolicyChangeRequest) -> None:
             rationale=req.rationale,
             category=req.category,
             node_type=req.node_type,
+            target_policy_id=req.target_policy_id,
             affected_segments=list(req.affected_segments),
             similar_policies=list(req.similar_policies),
             status=getattr(req.status, "value", req.status) or "queued",

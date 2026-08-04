@@ -6,7 +6,11 @@
 // current PoC set is gambling / bad_language / sex, but code must not hardcode.
 export type Category = string;
 export type AttributeLayer = "base" | "policy";
-export type PolicyType = "scoring" | "attribute" | "edge_case";
+export type PolicyType =
+  | "scoring"
+  | "attribute"
+  | "edge_case"
+  | "decision_rule";
 export type VideoStatus =
   | "pending"
   | "ingesting"
@@ -90,6 +94,8 @@ export interface Policy {
   parent_id?: string | null;
   text: string;
   structured_ref?: string | null;
+  // DB-managed structured payload: attribute_def / term_levels / decision_tree
+  structured_data?: any;
   status: string;
   // some backends may return a pre-nested tree
   children?: Policy[];
@@ -105,6 +111,9 @@ export interface PolicyChangeRequest {
   req_id: string;
   proposed_change: string;
   rationale: string;
+  category?: string | null;
+  node_type?: string | null;
+  target_policy_id?: string | null;
   affected_segments: string[];
   similar_policies: string[];
   status: ChangeRequestStatus;

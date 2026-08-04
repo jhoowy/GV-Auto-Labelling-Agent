@@ -129,6 +129,7 @@ class PolicyChangeRequest(Base):
     rationale: Mapped[str] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(String, nullable=True)
     node_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    target_policy_id: Mapped[str | None] = mapped_column(String, nullable=True)
     affected_segments: Mapped[list] = mapped_column(JSONB, default=list)
     similar_policies: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[str] = mapped_column(String, default="queued", index=True)
