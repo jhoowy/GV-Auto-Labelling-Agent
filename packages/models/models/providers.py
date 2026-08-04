@@ -27,7 +27,7 @@ from typing import Any, Protocol
 import httpx
 from openai import AsyncOpenAI
 
-from .config import role_spec
+from .config import base_config, role_spec
 from .tracing import observe
 
 _SEGMENT_SYS = (
@@ -152,13 +152,18 @@ class QwenASRAligner:
 
     def __init__(self, profile: str | None = None):
         self.base = role_spec("asr", profile)["base_url"]
+        # One request carries a whole video's 30 s windows, so long videos need a
+        # generous timeout (a 50 min video is ~100 windows). Config-driven; the
+        # old fixed 600 s failed on videos beyond ~40 min. See #30.
+        self.timeout = float(base_config().get("ingestion", {}).get(
+            "asr_timeout_seconds", 1800))
 
     async def transcribe(self, audio_paths: list[str],
                          language: str | None = None) -> list[dict]:
         """Batch transcribe+align: returns [{language, text, words:[{text,t_start,
         t_end}]}, ...], one per path. All clips go in ONE request because the
         engine must not be called concurrently."""
-        async with httpx.AsyncClient(timeout=600) as c:
+        async with httpx.AsyncClient(timeout=self.timeout) as c:
             r = await c.post(f"{self.base}/transcribe",
                              json={"audio_paths": audio_paths, "language": language})
             r.raise_for_status()
