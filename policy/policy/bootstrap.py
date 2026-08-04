@@ -181,25 +181,48 @@ def _observations(segments: list) -> str:
 _SYNTH_SYS = (
     "You are a content-moderation policy engineer. From observed gameplay-video "
     "shots and a PEGI-aligned 0..5 scoring rubric for ONE category, you design "
-    "the labelling policy: the attribute schema a labeller needs and an "
-    "attribute-based decision tree mapping attribute values to the 0..5 score. "
-    "Ground every attribute and rule in the rubric's bands. Respond with a "
-    "single JSON object only, no prose."
+    "the labelling policy: a small set of GENERAL, observable attributes "
+    "(signals) a labeller can tag in one pass, and an attribute-based decision "
+    "tree mapping their values to the 0..5 score. Ground every attribute and "
+    "rule in the rubric's bands. Respond with a single JSON object only, no "
+    "prose."
 )
 
-# Concrete example: anchors the output shape/quality and cuts the model's
-# reasoning (flash at temp 0 otherwise emits degenerate or truncated JSON).
-_ATTR_EXAMPLE = (
-    '{"attributes":[{"name":"casino_game_present","value_type":"boolean",'
-    '"values":null,"guidelines":"A recognisable casino game (slots, roulette, '
-    'poker, blackjack) is shown being played.","scores_informed":[2,3,4]},'
-    '{"name":"stake_type","value_type":"categorical","values":["none",'
-    '"in_game_currency","real_money"],"guidelines":"What is wagered: nothing, '
-    'in-game currency, or real money.","scores_informed":[2,4,5]}]}'
+# What separates a reusable signal from a baked-in verdict. Kept terse: flash
+# spends most of its output budget on hidden reasoning, and a long principle
+# inflates that reasoning until the JSON reply truncates.
+_ATTR_PRINCIPLE = (
+    "An ATTRIBUTE is a GENERAL, reusable signal — a closed enum (categorical, or "
+    "ordinal low..high) a labeller can point at in ONE frame — NEVER a verdict. "
+    "Put specificity in the ENUM VALUES of one general attribute, not in many "
+    "narrow booleans (NOT is_slot_machine; instead one `gambling_activity` with "
+    "values none/simulated_casino/loot_box/real_money_casino). Ban names "
+    "containing is_/core/frequent/functional/real/enough/primary — those are "
+    "judgments; express them as an ordinal value or a decision-tree rule."
+)
+
+# Attribute synthesis is split so every flash reply stays tiny (a rich all-in-one
+# reply truncates): stage 1 draws only names + value_type + scores; stage 2 fills
+# each attribute's enum/guidelines one attribute at a time.
+_ATTR_SKELETON_EXAMPLE = (
+    '{"attributes":['
+    '{"name":"gambling_activity","value_type":"categorical","scores_informed":'
+    '[1,2,3,4,5]},'
+    '{"name":"stake_severity","value_type":"ordinal","scores_informed":[2,4,5]},'
+    '{"name":"cashout_available","value_type":"boolean","scores_informed":[4,5]}'
+    ']}'
+)
+_DETAIL_EXAMPLE = (
+    '{"guidelines":"Which gambling-like activity, if any, is shown.","values":['
+    '{"value":"none","label":"None","description":"No gambling or chance-based '
+    'reward mechanic on screen.","examples":["a platformer level"]},'
+    '{"value":"simulated_casino","label":"Simulated casino","description":"A '
+    'casino game played with in-game currency.","examples":["poker with chips"]}'
+    ']}'
 )
 _RULE_EXAMPLE = (
-    '{"when":[{"attribute":"stake_type","op":"==","value":"real_money"}],'
-    '"score":5,"note":"Functional real-money gambling."}'
+    '{"when":[{"attribute":"stake_severity","op":">=","value":"real"}],'
+    '"score":5,"note":"Real-money stakes reach the highest band."}'
 )
 
 
@@ -213,24 +236,109 @@ def _judge_json(orch, prompt: str) -> dict:
     return {}
 
 
+def _salvage_objects(text: str) -> list[dict]:
+    """Recover every balanced `{...}` JSON object from a possibly-truncated reply.
+
+    flash spends most of its output budget on hidden reasoning, so a list reply
+    can be cut off mid-array; a stack scan still yields the complete element
+    objects (the unterminated outer object / last element are simply skipped)."""
+    objs: list[dict] = []
+    stack: list[int] = []
+    for i, ch in enumerate(text or ""):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            try:
+                obj = json.loads(text[start:i + 1])
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(obj, dict):
+                objs.append(obj)
+    return objs
+
+
 def _synth_attributes(orch, cat: str, rubric: str, obs: str) -> list[dict]:
-    """Ask the orchestrator to define the attributes a labeller needs."""
+    """Define the GENERAL observable attributes a labeller needs.
+
+    Two tiny reply stages keep flash inside its output budget (one rich all-in-one
+    reply truncates under its hidden reasoning): (1) a skeleton naming 4-6 general
+    attributes with only value_type + scores; (2) one call per attribute that
+    fills its enum values (with per-value copy) and detection guidelines."""
     prompt = (
         f"Category: {cat}\n\n"
         f"Scoring rubric (0..5 age bands):\n{rubric}\n\n"
         f"Observed shots:\n{obs}\n\n"
-        "Define 4-6 attributes a labeller must observe to decide the 0..5 score "
-        "for THIS category. Each attribute is an OBSERVABLE property of a shot, "
-        "never the score itself. Match this exact shape:\n" + _ATTR_EXAMPLE + "\n"
-        "value_type is boolean/categorical/level/count; values lists the allowed "
-        "values for categorical/level (else null); scores_informed are the rubric "
-        "bands the attribute is evidence for. One-sentence guidelines. Output the "
-        "JSON only."
+        f"{_ATTR_PRINCIPLE}\n\n"
+        "Name 4-6 GENERAL observable attributes a labeller tags to decide the "
+        "0..5 score for THIS category. Give ONLY name, value_type "
+        "(boolean/categorical/ordinal) and scores_informed (the rubric bands the "
+        "attribute is evidence for) — the enum values come later. Match this "
+        "exact shape:\n" + _ATTR_SKELETON_EXAMPLE + "\n"
+        "Keep it short; output the JSON only."
     )
-    raw = _judge_json(orch, prompt).get("attributes") or []
+    raw_text, parsed = "", {}
+    for _ in range(2):
+        raw_text = orch.judge(_SYNTH_SYS, prompt)
+        parsed = _parse_json(raw_text)
+        if parsed.get("attributes"):
+            break
+    raw = parsed.get("attributes") or []
     if isinstance(raw, dict):  # some replies key attributes by name
         raw = [{"name": k, **v} for k, v in raw.items() if isinstance(v, dict)]
-    return [a for a in raw if isinstance(a, dict) and a.get("name")]
+    attrs = [a for a in raw if isinstance(a, dict) and a.get("name")]
+    if not attrs:  # truncated reply -> salvage the complete attribute objects
+        attrs = [o for o in _salvage_objects(raw_text)
+                 if o.get("name") and o.get("value_type")]
+    for a in attrs:
+        _synth_detail(orch, cat, rubric, a)
+    return attrs
+
+
+def _synth_detail(orch, cat: str, rubric: str, attr: dict) -> None:
+    """Fill one attribute's `guidelines` and (for categorical/ordinal) its closed
+    enum `values` — a small per-attribute reply. Mutates `attr` in place; boolean
+    attributes keep `values=None`. Falls back to salvaged value objects when the
+    reply truncates, and to a bare guideline if none arrives."""
+    name = attr.get("name")
+    vtype = attr.get("value_type") or attr.get("type") or "categorical"
+    is_enum = vtype in ("categorical", "ordinal")
+    prompt = (
+        f"Category: {cat}. Attribute '{name}' (value_type {vtype}).\n"
+        f"Scoring rubric:\n{rubric}\n\n"
+        + ("Give its GENERAL detection `guidelines` (one line) and a CLOSED "
+           "`values` enum" + (" in ASCENDING order low..high" if vtype == "ordinal"
+                              else "") + ", each value with a one-line description "
+           "and 0-2 short frame examples. Keep specificity in these values, not in "
+           "the name. Output ONLY this JSON:\n" + _DETAIL_EXAMPLE
+           if is_enum else
+           "Give its GENERAL detection `guidelines` (one line). Output ONLY "
+           '{"guidelines":"..."}.')
+    )
+    raw_text = orch.judge(_SYNTH_SYS, prompt)
+    parsed = _parse_json(raw_text)
+    attr["guidelines"] = (parsed.get("guidelines")
+                          or attr.get("guidelines") or f"Observe {name}.")
+    if not is_enum:
+        attr["values"] = None
+        return
+    got = parsed.get("values")
+    if not got:  # truncated -> salvage the complete value objects
+        got = [o for o in _salvage_objects(raw_text) if "value" in o]
+    seen, values = set(), []
+    for v in got:
+        if not isinstance(v, dict):
+            continue
+        key = str(v.get("value") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        values.append({
+            "value": key, "label": v.get("label") or key,
+            "description": v.get("description") or "",
+            "examples": list(v.get("examples") or []),
+        })
+    attr["values"] = values or None
 
 
 def _rubric_bands(rubric: str) -> dict[int, str]:
@@ -252,13 +360,24 @@ def _synth_rule(orch, cat: str, schema_json: str, score: int, desc: str) -> dict
         f"Score {score} means: {desc}\n\n"
         f"Give ONE decision rule whose conditions over the attributes above "
         f"select score {score}. Output ONLY this JSON object:\n" + _RULE_EXAMPLE + "\n"
-        "Use only the attribute names/values above; short note; JSON only."
+        "Each condition is {attribute,op,value}; op is ==, in, present, or (for "
+        "ORDINAL attributes only, comparing against a listed value) >= / <=. Use "
+        "only the attribute names/values above; short note; JSON only."
     )
     d = _judge_json(orch, prompt)
     if "when" in d and "score" in d:
         d["score"] = max(0, min(5, int(score)))  # trust the requested band
         return d
     return None
+
+
+def _value_keys(values) -> list | None:
+    """The bare enum keys (`value` field) for the rule prompt — the model needs
+    the allowed values, not the full per-value copy. Accepts the rich dict form
+    or a plain list of strings."""
+    if not values:
+        return None
+    return [v.get("value") if isinstance(v, dict) else v for v in values]
 
 
 def _synth_decision_tree(orch, cat: str, rubric: str, attrs: list[dict]) -> dict:
@@ -268,7 +387,7 @@ def _synth_decision_tree(orch, cat: str, rubric: str, attrs: list[dict]) -> dict
     schema_json = json.dumps([
         {"name": a.get("name"),
          "value_type": a.get("value_type") or a.get("type"),
-         "values": a.get("values") or a.get("enum")}
+         "values": _value_keys(a.get("values") or a.get("enum"))}
         for a in attrs
     ])
     bands = _rubric_bands(rubric) or {s: "" for s in range(6)}
