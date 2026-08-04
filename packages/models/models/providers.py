@@ -259,6 +259,32 @@ class QwenOmni:
         return await self._scene_call(clip_path, audio_path, _RECONCILE_SYS, user)
 
 
+def _resp_text(resp) -> str:
+    """`resp.text` defensively — the property can raise when a candidate has no
+    text parts (e.g. a MAX_TOKENS response that is all thinking)."""
+    try:
+        return resp.text or ""
+    except Exception:
+        return ""
+
+
+def _resp_truncated(resp) -> bool:
+    """True when the answer is empty or the candidate hit the output cap
+    (finish_reason MAX_TOKENS) — the reasoning-starves-answer symptom from #16.
+    Kept defensive since candidate / finish_reason shapes vary across responses."""
+    if not _resp_text(resp).strip():
+        return True
+    try:
+        from google.genai import types
+
+        for cand in resp.candidates or []:
+            if cand.finish_reason == types.FinishReason.MAX_TOKENS:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 class GeminiOrchestrator:
     """Multimodal orchestrator for the labelling agent (google-genai).
 
@@ -268,6 +294,9 @@ class GeminiOrchestrator:
     audio-capable model is used so raw shot audio can be added later without an
     interface change."""
 
+    # Upper bound for the truncation retry so a runaway budget can't blow up.
+    _MAX_OUTPUT_CEIL = 32768
+
     def __init__(self, profile_name: str | None = None):
         import os
 
@@ -276,24 +305,42 @@ class GeminiOrchestrator:
         spec = role_spec("agent_llm", profile_name)
         self.model = spec["model"]
         self.temperature = float(spec.get("temperature", 0.0))
-        self.max_output_tokens = int(spec.get("max_tokens", 2048))
+        # gemini-3.5-flash is a reasoning model: hidden "thinking" draws from the
+        # same output budget, so keep it generous or the JSON answer gets
+        # truncated (finish_reason MAX_TOKENS, empty resp.text) — see #16.
+        self.max_output_tokens = int(spec.get("max_tokens", 8192))
+        # Cap reasoning so the visible answer always has room; a positive budget
+        # bounds thinking (vs -1 = unbounded / 0 = off). Overridable per profile.
+        self.thinking_budget = int(spec.get("thinking_budget", self.max_output_tokens // 2))
         self._client = genai.Client(api_key=os.environ["GENAI_API_KEY"])
 
     def _generate(self, system: str | None, parts: list, json_out: bool) -> str:
         from google.genai import types
 
-        cfg = types.GenerateContentConfig(
-            temperature=self.temperature,
-            max_output_tokens=self.max_output_tokens,
-            system_instruction=system or None,
-            response_mime_type="application/json" if json_out else None,
-        )
-        resp = self._client.models.generate_content(
-            model=self.model,
-            contents=[types.Content(role="user", parts=parts)],
-            config=cfg,
-        )
-        return resp.text or ""
+        def _run(max_tokens: int):
+            cfg = types.GenerateContentConfig(
+                temperature=self.temperature,
+                max_output_tokens=max_tokens,
+                system_instruction=system or None,
+                response_mime_type="application/json" if json_out else None,
+                # Bound thinking so it can't starve the answer within the budget.
+                thinking_config=types.ThinkingConfig(thinking_budget=self.thinking_budget),
+            )
+            return self._client.models.generate_content(
+                model=self.model,
+                contents=[types.Content(role="user", parts=parts)],
+                config=cfg,
+            )
+
+        resp = _run(self.max_output_tokens)
+        if not _resp_truncated(resp):
+            return _resp_text(resp)
+        # Reasoning likely ate the budget — retry once with a bigger ceiling
+        # (thinking stays capped, so the extra room goes to the answer).
+        retry_tokens = min(self.max_output_tokens * 2, self._MAX_OUTPUT_CEIL)
+        if retry_tokens > self.max_output_tokens:
+            resp = _run(retry_tokens)
+        return _resp_text(resp)  # "" if still empty; callers parse leniently
 
     @observe(name="gemini.judge", as_type="generation")
     def judge(self, system: str, prompt: str, frames: list[bytes] | None = None) -> str:
