@@ -10,6 +10,12 @@ from db import models as m
 from schemas import Attribute, Label, Segment, Utterance, Video, VideoMetadata
 from schemas.enums import VideoStatus
 
+# Node -> segment tracking aggregators (read-only, derived from labels).
+from tools.tracking import (  # noqa: F401  (re-exported for the service layer)
+    segments_for_attribute_value,
+    segments_for_rule,
+)
+
 
 def _apply_segment(obj: "m.Segment", seg: Segment) -> None:
     obj.video_id = seg.video_id

@@ -143,6 +143,15 @@ export interface Policy {
   children?: Policy[];
 }
 
+// A segment that was labelled through a given policy node (decision-tree rule
+// or attribute value), derived from stored label traces. See the node ->
+// segment tracking endpoints.
+export interface TrackedSegment {
+  segment_id: string;
+  video_id: string;
+  score: number;
+}
+
 export interface PolicySet {
   version: number;
   policy_versions: Record<string, number>; // policy_id -> version

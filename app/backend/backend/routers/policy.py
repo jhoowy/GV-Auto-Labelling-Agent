@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from tools import db_browser, policy_store
+from tools import db_browser, policy_store, tracking
 
 router = APIRouter(prefix="/api", tags=["policy"])
 
@@ -11,6 +11,18 @@ router = APIRouter(prefix="/api", tags=["policy"])
 @router.get("/policies")
 def get_policy_tree(category: str):
     return policy_store.get_policy_tree(category)
+
+
+@router.get("/policies/{category}/rule/{rule_index}/segments")
+def rule_segments(category: str, rule_index: int):
+    """Segments labelled via decision-tree rule `rule_index` of `category`."""
+    return tracking.segments_for_rule(category, rule_index)
+
+
+@router.get("/policies/{category}/attribute/{name}/segments")
+def attribute_segments(category: str, name: str, value: str):
+    """Segments whose label recorded attribute `name == value` for `category`."""
+    return tracking.segments_for_attribute_value(category, name, value)
 
 
 @router.get("/policy-sets")

@@ -3,12 +3,19 @@
 // with approve / reject actions.
 import { useEffect, useMemo, useState } from "react";
 import {
+  getAttributeValueSegments,
   getPolicies,
+  getRuleSegments,
   listChangeRequests,
   listPolicySets,
   resolveChangeRequest,
 } from "../../apis/client";
-import type { Category, Policy, PolicyChangeRequest } from "../../apis/types";
+import type {
+  Category,
+  Policy,
+  PolicyChangeRequest,
+  TrackedSegment,
+} from "../../apis/types";
 import { CATEGORIES } from "../../apis/types";
 import { useAsync } from "../../lib/useAsync";
 import {
@@ -115,6 +122,58 @@ function ruleAttrs(rule: any): string[] {
   return conds.map((c) => String(c?.attribute)).filter(Boolean);
 }
 
+// Mirrors the aggregator cap (tools/tracking.RESULT_CAP): a full page means
+// there may be more matches than shown.
+const TRACK_CAP = 200;
+
+// Node -> segment tracking: fetches the segments labelled via a policy node
+// (a decision-tree rule or an attribute value) and lists them, each linking to
+// its video in the viewer. Remount (via a `key`) to refetch for a new node.
+function SegmentTrackPanel({
+  title,
+  fetcher,
+  onClose,
+}: {
+  title: string;
+  fetcher: () => Promise<TrackedSegment[]>;
+  onClose: () => void;
+}) {
+  const { data, loading, error } = useAsync(fetcher, []);
+  const segs = data ?? [];
+  return (
+    <div className="card" style={{ marginTop: 8 }}>
+      <div className="row spread">
+        <strong className="small">{title}</strong>
+        <button className="btn" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <AsyncState
+        loading={loading}
+        error={error}
+        empty={segs.length === 0}
+        emptyText="No segments were labelled via this node."
+      >
+        <div className="grid" style={{ gap: 4, marginTop: 6 }}>
+          {segs.map((s) => (
+            <div key={s.segment_id} className="row spread small">
+              <a className="mono" href={`/viewer/${encodeURIComponent(s.video_id)}`}>
+                {s.segment_id}
+              </a>
+              <ScoreBadge score={s.score} />
+            </div>
+          ))}
+        </div>
+        {segs.length >= TRACK_CAP && (
+          <div className="muted small" style={{ marginTop: 6 }}>
+            Showing first {TRACK_CAP} matches.
+          </div>
+        )}
+      </AsyncState>
+    </div>
+  );
+}
+
 function PolicyTreeSection({ category }: { category: Category }) {
   const { data, loading, error } = useAsync(() => getPolicies(category), [category]);
   const flat = data ?? [];
@@ -161,6 +220,7 @@ function PolicyTreeSection({ category }: { category: Category }) {
                       node={n}
                       depth={0}
                       highlighted={highlighted}
+                      category={category}
                     />
                   ))}
                 </div>
@@ -176,6 +236,7 @@ function PolicyTreeSection({ category }: { category: Category }) {
                 node={n}
                 depth={0}
                 highlighted={highlighted}
+                category={category}
               />
             ))}
         </div>
@@ -184,6 +245,15 @@ function PolicyTreeSection({ category }: { category: Category }) {
           selected={selectedRule}
           onSelect={(i) => setSelectedRule((cur) => (cur === i ? null : i))}
         />
+        {/* Selecting a rule also lists the segments it labelled. */}
+        {selectedRule != null && (
+          <SegmentTrackPanel
+            key={`${category}-rule-${selectedRule}`}
+            title={`Segments labelled via rule #${selectedRule + 1}`}
+            fetcher={() => getRuleSegments(category, selectedRule)}
+            onClose={() => setSelectedRule(null)}
+          />
+        )}
       </AsyncState>
     </section>
   );
@@ -208,7 +278,17 @@ function fmtValue(v: any): string {
   return String(v);
 }
 
-function AttributeBody({ sd }: { sd: any }) {
+function AttributeBody({
+  sd,
+  category,
+  attr,
+}: {
+  sd: any;
+  category: Category;
+  attr: string;
+}) {
+  // The attribute value whose labelled segments are currently expanded.
+  const [active, setActive] = useState<string | null>(null);
   if (!sd || typeof sd !== "object") return null;
 
   if (sd.kind === "term_levels" && sd.levels && typeof sd.levels === "object") {
@@ -283,10 +363,30 @@ function AttributeBody({ sd }: { sd: any }) {
                 const obj = v && typeof v === "object" ? v : { value: v };
                 const ex = Array.isArray(obj.examples) ? obj.examples : [];
                 const rules = Array.isArray(obj.rules) ? obj.rules : [];
+                const valStr = String(obj.value ?? "");
                 return (
                   <tr key={i}>
                     {ordinal && <td className="muted mono">{i}</td>}
-                    <td className="mono">{String(obj.value ?? "")}</td>
+                    <td className="mono">
+                      {/* Click a value to see the segments labelled with it. */}
+                      <button
+                        onClick={() =>
+                          setActive((cur) => (cur === valStr ? null : valStr))
+                        }
+                        title="Show segments labelled with this value"
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          cursor: "pointer",
+                          font: "inherit",
+                          color: "inherit",
+                          textDecoration: "underline dotted",
+                        }}
+                      >
+                        {valStr}
+                      </button>
+                    </td>
                     <td>{String(obj.label ?? "")}</td>
                     <td className="small">{String(obj.description ?? "")}</td>
                     <td className="small">
@@ -309,6 +409,14 @@ function AttributeBody({ sd }: { sd: any }) {
             </tbody>
           </table>
         </div>
+      )}
+      {active != null && (
+        <SegmentTrackPanel
+          key={`${category}-${attr}-${active}`}
+          title={`Segments where ${attr} = ${active}`}
+          fetcher={() => getAttributeValueSegments(category, attr, active)}
+          onClose={() => setActive(null)}
+        />
       )}
     </div>
   );
@@ -590,10 +698,12 @@ function PolicyNode({
   node,
   depth,
   highlighted,
+  category,
 }: {
   node: Policy;
   depth: number;
   highlighted: Set<string>;
+  category: Category;
 }) {
   const isAttr = node.type === "attribute";
   const key = attrKey(node);
@@ -614,14 +724,21 @@ function PolicyNode({
           <Badge tone={node.status === "active" ? "ok" : "gray"}>{node.status}</Badge>
         </div>
         <p style={{ margin: "8px 0 0" }}>{node.text}</p>
-        {isAttr && <AttributeBody sd={node.structured_data} />}
+        {isAttr && (
+          <AttributeBody sd={node.structured_data} category={category} attr={key} />
+        )}
         {node.structured_ref && (
           <div className="muted small mono">structured_ref: {node.structured_ref}</div>
         )}
       </div>
       {node.children?.map((c) => (
         <div key={c.policy_id} style={{ marginTop: 8 }}>
-          <PolicyNode node={c} depth={depth + 1} highlighted={highlighted} />
+          <PolicyNode
+            node={c}
+            depth={depth + 1}
+            highlighted={highlighted}
+            category={category}
+          />
         </div>
       ))}
     </div>

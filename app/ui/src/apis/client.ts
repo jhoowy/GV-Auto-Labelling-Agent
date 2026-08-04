@@ -11,6 +11,7 @@ import type {
   PolicyChangeRequest,
   PolicySet,
   Segment,
+  TrackedSegment,
   Video,
   VideoListItem,
 } from "./types";
@@ -93,6 +94,24 @@ export const resolveChangeRequest = (reqId: string, approve: boolean) =>
       approve,
     })}`,
     { method: "POST" },
+  );
+
+// ---- Node -> segment tracking --------------------------------------------
+// Which segments were labelled via a decision-tree rule / attribute value.
+export const getRuleSegments = (category: string, ruleIndex: number) =>
+  api<TrackedSegment[]>(
+    `/api/policies/${encodeURIComponent(category)}/rule/${ruleIndex}/segments`,
+  );
+
+export const getAttributeValueSegments = (
+  category: string,
+  name: string,
+  value: string,
+) =>
+  api<TrackedSegment[]>(
+    `/api/policies/${encodeURIComponent(category)}/attribute/${encodeURIComponent(
+      name,
+    )}/segments${qs({ value })}`,
   );
 
 // ---- DB browser ----------------------------------------------------------
