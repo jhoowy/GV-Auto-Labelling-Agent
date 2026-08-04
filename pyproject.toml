@@ -7,6 +7,7 @@ dependencies = [
     # Agent / orchestration
     "langchain>=0.3",
     "langgraph>=0.2",
+    "langfuse>=3",  # opt-in tracing (no-op unless LANGFUSE_* env is set)
     # Backend
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

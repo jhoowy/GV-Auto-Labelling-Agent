@@ -278,6 +278,13 @@ pytest                                                  # 45개 helper 테스트
 `MODEL_PROFILE=local`이 배선된 프로파일이며, Gemini orchestrator용
 `GENAI_API_KEY`를 설정한다. `regular`는 미배선 proprietary 템플릿이다.
 
+**관측성(선택).** `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`(셀프호스팅은
+`LANGFUSE_HOST`도)가 설정되면 labelling이 **Langfuse**로 추적된다 —
+`label_video` 실행마다 trace 1개, LangGraph 노드마다 span, 그리고 LangChain을
+거치지 않는 직접 SDK 호출(Gemini orchestrator, GPT policy author)마다 중첩된
+generation span. env가 없으면 `models.tracing`은 no-op으로 동작하며 아무것도
+전송하지 않는다(`packages/models/tracing.py`).
+
 ## 테스트
 
 `tests/`는 순수(DB/모델 무관) helper를 커버한다 — score clamp, 관대한 JSON 파싱,
