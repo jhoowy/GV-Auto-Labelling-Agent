@@ -6,12 +6,13 @@ with a restricted tool set. The window slides until all segments are labelled.
              (loop to next window until done)
 
   RETRIEVE  policies + precedents
-  JUDGE     per category: extract the defined attributes (frames + summary +
-            ASR) and apply the decision-rule tree to a score; categories with no
-            attribute defs/tree (and all of bootstrap) fall back to holistic
-            multimodal scoring
-  SIDE_FX   propose_policy_change (queue) — incl. rule-change requests when the
-            tree doesn't fit / define_structured_attribute (bootstrap)
+  JUDGE     categories with attribute defs + a decision tree run an explicit
+            SELECT -> EXTRACT -> DECIDE(+trajectory) -> REVIEW -> STORE pipeline
+            per shot (deterministic score from the tree; REVIEW cannot override
+            it); categories with no defs/tree (and all of bootstrap) fall back to
+            holistic multimodal scoring
+  SIDE_FX   propose_policy_change (queue) — incl. rule-change requests REVIEW
+            flags / define_structured_attribute (bootstrap)
   COMMIT    emit labels + update the carry-over rolling summary
 
 See docs/AGENT_WORKFLOW.md for the full definition.
@@ -79,6 +80,32 @@ _EXTRACT_SYS = (
     'form {{"attributes":{{"<name>":{{"value":<value>,"evidence":str}}}},'
     '"confidence":float,"need_more_frames":bool,"tree_fits":bool,'
     '"gap_note":str}}.'
+)
+
+_SELECT_SYS = (
+    "You are a content-moderation labelling agent for gameplay videos. Decide "
+    "which policy CATEGORIES are relevant to the TARGET SHOT and, for each "
+    "relevant category, which of its ATTRIBUTES you can label from the evidence. "
+    "You are shown each category with its attribute NAMES only (not their full "
+    "definitions). Select a category only if the shot plausibly contains that "
+    "content; select an attribute only if the up-to-5 sampled frames + summary + "
+    "ASR text let you label it. Omit categories/attributes that do not apply — "
+    "anything omitted is treated as absent (empty) and left out of scoring. "
+    "Return ONLY JSON of the form "
+    '{"selections":[{"category":str,"attributes":[str]}]}.'
+)
+
+_REVIEW_SYS = (
+    "You are a content-moderation reviewer for gameplay videos. For the TARGET "
+    "SHOT you are given, per category, a score that was computed "
+    "DETERMINISTICALLY from a decision tree over the extracted attributes, plus "
+    "the decision trajectory (which attributes were selected, their extracted "
+    "values, and which rule fired). Judge whether the score and trajectory are "
+    "appropriate for the shot. You CANNOT change the score. If the score looks "
+    "wrong, or the tree failed to capture the shot's relevant content, set "
+    "needs_change=true and describe in change_note what the decision tree should "
+    "do differently; otherwise needs_change=false. Return ONLY JSON of the form "
+    '{"reviews":[{"category":str,"needs_change":bool,"change_note":str}]}.'
 )
 
 
@@ -282,6 +309,75 @@ def _extract_prompt(state, seg, asr, cat, attr_lines) -> str:
     )
 
 
+def _select_prompt(state, seg, asr, names_by_cat: dict[str, list]) -> str:
+    cats_block = "\n".join(
+        f"- {cat}: {', '.join(names) or '(no attributes)'}"
+        for cat, names in names_by_cat.items()
+    ) or "none"
+    return (
+        f"GLOBAL VIDEO OVERVIEW:\n{state.get('global_overview', '') or 'n/a'}\n\n"
+        f"CARRY-OVER (confirmed so far):\n{state.get('carry_over', '') or 'none'}\n\n"
+        f"TARGET SHOT (frames attached below):\n{_segment_block(seg, asr, [])}\n\n"
+        f"CATEGORIES AND THEIR ATTRIBUTES:\n{cats_block}\n\n"
+        "Select the relevant categories and, per category, the attributes to label."
+    )
+
+
+def _review_prompt(state, seg, asr, items: list[dict]) -> str:
+    block = "\n".join(
+        f"- {it['category']}: score={it['score']}\n"
+        f"    trajectory: {json.dumps(it['trajectory'], ensure_ascii=False)}"
+        for it in items
+    ) or "none"
+    return (
+        f"GLOBAL VIDEO OVERVIEW:\n{state.get('global_overview', '') or 'n/a'}\n\n"
+        f"CARRY-OVER (confirmed so far):\n{state.get('carry_over', '') or 'none'}\n\n"
+        f"TARGET SHOT (frames attached below):\n{_segment_block(seg, asr, [])}\n\n"
+        f"DETERMINISTIC SCORES AND TRAJECTORIES:\n{block}\n\n"
+        "Review each category's score and trajectory for the TARGET SHOT."
+    )
+
+
+def _parse_selections(parsed: dict, attr_cats: list[str],
+                      names_by_cat: dict[str, list]) -> dict[str, list]:
+    """Lenient parse of the SELECT call into {category: [attr_name,...]}.
+
+    Only known categories and known attribute names survive; every attribute-
+    driven category is present, defaulting to [] when the agent omits it — an
+    omitted category/attribute is considered-and-empty, so the tree runs without
+    those values (empty-safe -> typically the default score)."""
+    sel: dict[str, list] = {c: [] for c in attr_cats}
+    for item in parsed.get("selections") or []:
+        if not isinstance(item, dict):
+            continue
+        cat = item.get("category")
+        if cat not in sel:
+            continue
+        known = names_by_cat.get(cat, [])
+        picked: list[str] = []
+        for name in item.get("attributes") or []:
+            if name in known and name not in picked:
+                picked.append(name)
+        sel[cat] = picked
+    return sel
+
+
+def _parse_reviews(parsed: dict, attr_cats: list[str]) -> dict[str, dict]:
+    """Lenient parse of the REVIEW call into {category: {needs_change, change_note}}.
+    Only known categories are kept; the review never carries a score (REVIEW
+    cannot override the deterministic decision-tree score)."""
+    out: dict[str, dict] = {}
+    for item in parsed.get("reviews") or []:
+        if not isinstance(item, dict):
+            continue
+        cat = item.get("category")
+        if cat not in attr_cats:
+            continue
+        out[cat] = {"needs_change": bool(item.get("needs_change")),
+                    "change_note": str(item.get("change_note") or "")}
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # stage nodes
 # --------------------------------------------------------------------------- #
@@ -339,12 +435,14 @@ def _retrieve(state: LabellingState) -> dict:
 def _judge(state: LabellingState) -> dict:
     """Attribute-driven judging.
 
-    Per confirm shot, per category: if the category has ATTRIBUTE definitions
-    plus a DECISION_RULE tree, extract each defined attribute's value once from
-    the ≤5 frames + summary + ASR, then apply the tree deterministically to a
-    score. Categories with no defs/rules (or any category in bootstrap, which is
-    still discovering the policy) fall back to holistic multimodal scoring.
-    The orchestrator/DB are resolved here, so build_graph() needs no server."""
+    Per confirm shot, the categories that have ATTRIBUTE definitions plus a
+    DECISION_RULE tree run one explicit SELECT -> EXTRACT -> DECIDE -> REVIEW ->
+    STORE pipeline (`_judge_pipeline`): SELECT/REVIEW are single cross-category
+    calls, EXTRACT is one call per selected category, DECIDE applies the tree
+    deterministically, and STORE emits one Label per category. Categories with no
+    defs/rules (or any category in bootstrap, which is still discovering the
+    policy) fall back to holistic multimodal scoring. The orchestrator/DB are
+    resolved here, so build_graph() needs no server."""
     from models import get_agent_llm
     from tools import policy_store, retrieval
 
@@ -379,15 +477,15 @@ def _judge(state: LabellingState) -> dict:
     proposals: list[dict] = []
     for seg in confirm:
         text = asr.get(seg.segment_id, "")
+        # Frames are sampled ONCE per shot and reused across the pipeline's
+        # SELECT / EXTRACT / REVIEW calls (and the holistic fallback below).
         frames = agent_tools.sample_frames(seg, _FRAMES_PER_SHOT)
 
-        for cat in attr_cats:
-            lbl, prop = _judge_attribute_driven(
-                orch, state, seg, text, frames, cat,
-                cat_defs[cat], cat_rule[cat])
-            drafts.append(lbl)
-            if prop:
-                proposals.append(prop)
+        if attr_cats:
+            ad_drafts, ad_props = _judge_pipeline(
+                orch, state, seg, text, frames, attr_cats, cat_defs, cat_rule)
+            drafts.extend(ad_drafts)
+            proposals.extend(ad_props)
 
         if fallback_cats:
             fb_drafts, fb_props = _judge_holistic(
@@ -399,96 +497,186 @@ def _judge(state: LabellingState) -> dict:
     return {"draft_labels": drafts, "proposals": proposals}
 
 
-def _judge_attribute_driven(orch, state, seg, asr, frames, cat, defs, rule_node):
-    """Extract each defined attribute for the shot, then apply the category's
-    decision tree deterministically. Returns (Label, rule-change proposal|None)."""
+def _attr_name(policy_id: str) -> str:
+    """Bare attribute name from a `<category>.attr.<name>` node id."""
+    return policy_id.split(".attr.", 1)[1] if ".attr." in policy_id else policy_id
+
+
+def _attr_line(name: str, sd: dict, fallback_text: str) -> str:
+    """One EXTRACT prompt line for an attribute: its value_type, allowed values
+    (each with description AND its per-value edge-case `rules`), and detect note.
+    The per-value `rules` are the case-notes shipped in the attribute def; the
+    extractor must see them to pick the right value."""
+    vals = sd.get("values") or []
+    line = f"- {name} ({sd.get('value_type', '')})"
+    if vals:
+        rendered = []
+        for v in vals:
+            if not isinstance(v, dict):
+                rendered.append(str(v))
+                continue
+            piece = f"{v.get('value')} — {v.get('description', '')}".rstrip(" —")
+            for r in v.get("rules") or []:
+                piece += f"\n      rule: {r}"
+            rendered.append(piece)
+        line += " — pick one of:\n    " + "\n    ".join(rendered)
+    return line + f"\n    detect: {sd.get('guidelines', fallback_text)}"
+
+
+def _attr_index(defs: list) -> dict:
+    """Index a category's attribute-def nodes for the pipeline: name -> node, the
+    ordinal ascending-value map (so rules can compare with >=), the bare name
+    list (shown in SELECT), and a rendered EXTRACT line per attribute."""
     def_by_name: dict[str, object] = {}
     order: dict[str, list] = {}
-    lines: list[str] = []
+    names: list[str] = []
+    line_by_name: dict[str, str] = {}
     for d in defs:
-        name = d.policy_id.split(".attr.", 1)[1] if ".attr." in d.policy_id else d.policy_id
+        name = _attr_name(d.policy_id)
         def_by_name[name] = d
+        names.append(name)
         sd = d.structured_data or {}
         vals = sd.get("values") or []
         keys = [v.get("value") if isinstance(v, dict) else v for v in vals]
         if sd.get("value_type") == "ordinal" and keys:
             order[name] = keys  # ascending -> lets rules compare with >=
-        line = f"- {name} ({sd.get('value_type', '')})"
-        if vals:
-            rendered = "; ".join(
-                f"{v.get('value')} — {v.get('description', '')}".rstrip(" —")
-                if isinstance(v, dict) else str(v)
-                for v in vals
-            )
-            line += f" — pick one of: {rendered}"
-        lines.append(line + f"\n    detect: {sd.get('guidelines', d.text)}")
+        line_by_name[name] = _attr_line(name, sd, d.text)
+    return {"def_by_name": def_by_name, "order": order,
+            "names": names, "line_by_name": line_by_name}
 
+
+def _extract_selected(orch, state, seg, asr, frames, cat, idx, names):
+    """EXTRACT: one call resolving ONLY the `names` selected attributes to
+    value + evidence, rendering each with its allowed values and per-value rules.
+    Keeps the need_more_frames/expand_frames retry. Returns {name: {value,
+    evidence}} for the selected attributes the model actually returned."""
+    lines = "\n".join(idx["line_by_name"][n] for n in names)
     system = _EXTRACT_SYS.format(cat=cat)
-    prompt = _extract_prompt(state, seg, asr, cat, "\n".join(lines))
+    prompt = _extract_prompt(state, seg, asr, cat, lines)
     parsed = _parse_json(orch.judge(system, prompt, frames))
     if parsed.get("need_more_frames") and frames:
         more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
         parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
+    return {n: o for n, o in (parsed.get("attributes") or {}).items()
+            if isinstance(o, dict) and n in names}
 
-    extracted = {n: o for n, o in (parsed.get("attributes") or {}).items()
-                 if isinstance(o, dict)}
-    values = {n: o.get("value") for n, o in extracted.items()}
 
-    tree = rule_node.structured_data or {}
-    rules = tree.get("rules") or []
-    score, matched = _apply_decision_tree(
-        rules, tree.get("default", 0), values, order)
-
-    # evidence_attributes: one policy-layer Attribute per extracted defined attr.
+def _build_label(seg, cat, score, trajectory, matched, defs, rule_node,
+                 idx, selected, extracted) -> Label:
+    """STORE: one Label per attribute-driven category. `evidence_attributes`
+    covers EVERY defined attribute — selected+extracted ones carry their value +
+    evidence (source judge/extract); unselected/empty ones are stored with an
+    EMPTY value (value="", evidence=None, source judge/unselected) so
+    considered-and-empty is distinguishable downstream. Cited pins = all attr-def
+    nodes + the rule node; tool_trace holds the decision trajectory; rationale is
+    the matched-rule note (as today)."""
     evidence: list[Attribute] = []
-    for name, o in extracted.items():
-        d = def_by_name.get(name)
-        if not d:
-            continue
-        evidence.append(Attribute(
-            key=name, value=_attr_value(o.get("value")),
-            layer=AttributeLayer.POLICY, source="judge/extract",
-            evidence=str(o.get("evidence") or "") or None,
-            policy_version=d.version,
-        ))
+    for name in idx["names"]:
+        d = idx["def_by_name"][name]
+        o = extracted.get(name)
+        if name in selected and o is not None:
+            evidence.append(Attribute(
+                key=name, value=_attr_value(o.get("value")),
+                layer=AttributeLayer.POLICY, source="judge/extract",
+                evidence=str(o.get("evidence") or "") or None,
+                policy_version=d.version))
+        else:
+            evidence.append(Attribute(
+                key=name, value="", layer=AttributeLayer.POLICY,
+                source="judge/unselected", evidence=None,
+                policy_version=d.version))
 
     # cited pins: every attribute-def node + the rule node, canonicalised.
     ver_map = {d.policy_id: d.version for d in defs}
     ver_map[rule_node.policy_id] = rule_node.version
-    cited = _normalise_pins([d.policy_id for d in defs] + [rule_node.policy_id], ver_map)
+    cited = _normalise_pins(
+        [d.policy_id for d in defs] + [rule_node.policy_id], ver_map)
 
     if matched is not None:
-        idx = rules.index(matched)
-        note = matched.get("note", "")
-        rationale = f"[{cat}] rule #{idx} matched (score {score}): {note}".rstrip()
-        decision = {"category": cat, "rule_index": idx, "rule_note": note,
-                    "score": score}
+        rationale = (f"[{cat}] rule #{trajectory['rule_index']} matched "
+                     f"(score {score}): {trajectory['rule_note']}").rstrip()
     else:
         rationale = (f"[{cat}] no decision rule matched the extracted attributes; "
                      f"applied default score {score}.")
-        decision = {"category": cat, "rule_index": None, "score": score}
-
-    lbl = Label(
+    return Label(
         label_id="", segment_id=seg.segment_id, category=cat, score=score,
         rationale=rationale, cited_policy_ids=cited, evidence_attributes=evidence,
-        confidence=parsed.get("confidence"), tool_trace=[{"decision": decision}],
-    )
+        tool_trace=[{"decision": trajectory}])
 
-    # Request a rule modification (queued, not applied) when the tree clearly
-    # doesn't fit: orchestrator flags tree_fits=false, or nothing matched + gap.
-    proposal = None
-    tree_fits = parsed.get("tree_fits", True)
-    gap_note = (parsed.get("gap_note") or "").strip()
-    if tree_fits is False or (matched is None and gap_note):
-        proposal = {"rule_change": {
-            "category": cat, "target_policy_id": rule_node.policy_id,
-            "segment_id": seg.segment_id,
-            "change": (f"Extend/adjust the {cat} decision tree: "
-                       f"{gap_note or 'shot content matched no existing rule.'}"),
-            "rationale": (f"Shot {seg.segment_id} extracted {values} but the "
-                          "current rule tree did not fit."),
-        }}
-    return lbl, proposal
+
+def _judge_pipeline(orch, state, seg, asr, frames, attr_cats, cat_defs, cat_rule):
+    """SELECT -> EXTRACT -> DECIDE(+trajectory) -> REVIEW -> STORE across the
+    attribute-driven categories for one shot. Frames are sampled once by the
+    caller and reused across the SELECT / EXTRACT / REVIEW calls. Returns
+    (labels, rule-change proposals)."""
+    idx = {c: _attr_index(cat_defs[c]) for c in attr_cats}
+    names_by_cat = {c: idx[c]["names"] for c in attr_cats}
+
+    # 1. SELECT — one call across all attribute-driven categories: which
+    # categories are relevant and, per category, which attributes to label.
+    sel_parsed = _parse_json(orch.judge(
+        _SELECT_SYS, _select_prompt(state, seg, asr, names_by_cat), frames))
+    selected = _parse_selections(sel_parsed, attr_cats, names_by_cat)
+
+    # 2. EXTRACT (per selected category) + 3. DECIDE (deterministic tree over the
+    # extracted values). A category with no selected attributes skips its EXTRACT
+    # call; the empty-safe tree then falls through to its default score.
+    extracted_by_cat: dict[str, dict] = {}
+    scores: dict[str, int] = {}
+    matched_by_cat: dict[str, object] = {}
+    trajectories: dict[str, dict] = {}
+    for cat in attr_cats:
+        names = selected[cat]
+        extracted = ({} if not names
+                     else _extract_selected(orch, state, seg, asr, frames, cat,
+                                            idx[cat], names))
+        extracted_by_cat[cat] = extracted
+        values = {n: o.get("value") for n, o in extracted.items()}
+
+        tree = cat_rule[cat].structured_data or {}
+        rules = tree.get("rules") or []
+        score, matched = _apply_decision_tree(
+            rules, tree.get("default", 0), values, idx[cat]["order"])
+        scores[cat] = score
+        matched_by_cat[cat] = matched
+        trajectories[cat] = {
+            "selected": list(names),
+            "extracted": dict(values),
+            "rule_index": rules.index(matched) if matched is not None else None,
+            "rule_note": matched.get("note", "") if matched is not None else "",
+            "score": score,
+        }
+
+    # 4. REVIEW — one call across the categories; the model judges appropriateness
+    # but CANNOT change the deterministic score. needs_change -> rule-change.
+    items = [{"category": c, "score": scores[c], "trajectory": trajectories[c]}
+             for c in attr_cats]
+    rev_parsed = _parse_json(orch.judge(
+        _REVIEW_SYS, _review_prompt(state, seg, asr, items), frames))
+    reviews = _parse_reviews(rev_parsed, attr_cats)
+
+    # 5. STORE — one Label per attribute-driven category; map a flagged review to
+    # the rule-change proposal shape _side_fx already consumes.
+    labels: list[Label] = []
+    proposals: list[dict] = []
+    for cat in attr_cats:
+        labels.append(_build_label(
+            seg, cat, scores[cat], trajectories[cat], matched_by_cat[cat],
+            cat_defs[cat], cat_rule[cat], idx[cat], selected[cat],
+            extracted_by_cat[cat]))
+        rv = reviews.get(cat)
+        if rv and rv["needs_change"]:
+            note = rv["change_note"]
+            proposals.append({"rule_change": {
+                "category": cat, "target_policy_id": cat_rule[cat].policy_id,
+                "segment_id": seg.segment_id,
+                "change": (f"Adjust the {cat} decision tree: {note}" if note
+                           else f"Adjust the {cat} decision tree to fit this shot."),
+                "rationale": (f"Reviewer flagged shot {seg.segment_id} score "
+                              f"{scores[cat]} as inappropriate for the extracted "
+                              f"attributes {trajectories[cat]['extracted']}."),
+            }})
+    return labels, proposals
 
 
 def _judge_holistic(orch, state, seg, asr, frames, cats, policies, precedents,

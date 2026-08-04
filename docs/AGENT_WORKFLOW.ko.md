@@ -16,9 +16,10 @@ flowchart LR
 ```
 
 이전 초안의 `DERIVE`와 `CHECK`는 **JUDGE로 흡수**되었다: 합성된 정책이 있는
-카테고리는 JUDGE가 정의된 attribute를 추출하고 결정 규칙 트리를 적용한다. 아직
-holistic 폴백인 카테고리는 판정 단계 안에서 구조화 신호를 파생하고 선례 일관성을
-체크한다. `SIDE_FX`는 유지된다.
+카테고리는 JUDGE가 명시적 **SELECT → EXTRACT → DECIDE → REVIEW → STORE**
+파이프라인을 실행한다(트리가 score를 결정적으로 산출하며, REVIEW는 적절성을
+검토하지만 score를 뒤집을 수 없다). 아직 holistic 폴백인 카테고리는 판정 단계
+안에서 구조화 신호를 파생하고 선례 일관성을 체크한다. `SIDE_FX`는 유지된다.
 
 ## Orchestrator 모델
 
@@ -73,35 +74,58 @@ policy.categories`, 현재 gambling / bad_language / sex)에서 N-길이 리스�
 도구: retrieval 전용.
 
 ### JUDGE  *(DERIVE + CHECK 흡수)*
-판정은 **confirm shot마다, 카테고리마다** 이뤄지며, 카테고리에 합성된 정책이
-있는지에 따라 두 경로 중 하나를 탄다:
+판정은 **confirm shot마다** 이뤄진다. 합성된 정책이 있는 카테고리(ATTRIBUTE
+definition **및** DECISION_RULE 트리 보유, 그리고 bootstrap 아님)는 attribute
+기반 **SELECT → EXTRACT → DECIDE → REVIEW → STORE** 파이프라인을 실행하고,
+나머지(합성 정책 없음, 그리고 bootstrap 중의 *모든* 카테고리)는 holistic 폴백을
+유지한다. 프레임(≤5)은 shot당 **한 번만** 샘플링해 모든 호출에서 재사용한다.
 
 ```mermaid
 flowchart TB
-  IN["confirm shot × 카테고리"]
-  IN --> Q{"attribute def<br/>+ decision-rule 트리?<br/>(그리고 bootstrap 아님)"}
+  IN["confirm shot마다"]
+  IN --> Q{"attribute def + decision 트리<br/>보유 카테고리?<br/>(그리고 bootstrap 아님)"}
 
-  Q -->|"예 — attribute 기반"| EX["정의된 각 attribute 추출<br/>(value + evidence): 프레임 ≤5 + summary + ASR"]
-  EX --> AP["결정 규칙 트리를 결정적으로 적용<br/>(우선순위 순; 첫 매칭 win, 없으면 default)"]
-  AP --> SC1["score + rationale (매칭 규칙 note)<br/>evidence_attributes · cited pin (attr-def + rule 노드)"]
-  AP -->|"트리가 안 맞음"| RC["rule-change 요청 큐잉<br/>(decision-rule 노드 타깃)"]
+  Q -->|"attribute 기반 카테고리"| SEL["SELECT — 해당 카테고리 전체 대상 호출 1회:<br/>어떤 카테고리 + 어떤 attribute 이름을 라벨링할지"]
+  SEL --> EXT["EXTRACT — 선택된 카테고리마다 호출 1회:<br/>선택 attribute → value + evidence (값은 per-value rule과 함께 제시)"]
+  EXT --> DEC["DECIDE — 추출값에 결정 트리를 결정적으로 적용<br/>→ score + trajectory (LLM 호출 없음)"]
+  DEC --> REV["REVIEW — 카테고리 전체 대상 호출 1회:<br/>적절성 판정; score는 바꿀 수 없음"]
+  REV --> STO["STORE — 카테고리당 Label 1개<br/>evidence는 모든 attr 포함 · cited pin(attr-def + rule) · trajectory"]
+  REV -->|"needs_change"| RC["rule-change 요청 큐잉<br/>(decision-rule 노드 타깃)"]
 
   Q -->|"정책 없음 / bootstrap — holistic"| HD["구조화 신호 파생<br/>(예: ASR에 term-level word-list로 욕설 매칭)"]
   HD --> HS["N개 카테고리에 멀티모달 채점 호출 1회<br/>0..5 · rationale · cited pin · evidence"]
   HS --> CK{"선례와 비교"}
   CK -->|"배치(divergent)"| ISS["decision 항목에 precedent_divergence 기록<br/>(자동 재판정 없음)"]
 
-  EX -.->|"프레임 부족"| EXP["expand_frames → 1회 재추출"]
+  EXT -.->|"프레임 부족"| EXP["expand_frames → 1회 재추출"]
   HS -.->|"프레임 부족"| EXP
 ```
 
-**Attribute 기반 경로**(카테고리에 ATTRIBUTE definition + DECISION_RULE 트리 존재):
-카테고리당 추출 호출 1회가 정의된 각 attribute를 닫힌 enum / ordinal에 맞춰
-value + evidence로 해석하고, 이후 트리를 코드에서 **결정적으로** 적용한다(채점
-호출 없음). 첫 완전 매칭 규칙의 score가 win, 없으면 트리 default. orchestrator가
-트리가 안 맞는다고 표시하면(또는 아무것도 매칭 안 되고 gap을 보고하면) JUDGE는
-그 decision-rule 노드를 타깃으로 **rule-change 요청을 큐잉**한다 — 큐잉만, 자동
-적용 없음.
+**Attribute 기반 파이프라인**(ATTRIBUTE definition + DECISION_RULE 트리 보유
+카테고리):
+- **SELECT** — attribute 기반 카테고리 전체를 대상으로 한 orchestrator 호출 1회.
+  각 카테고리를 attribute **이름만** 보여주고, 어떤 카테고리가 관련되는지와
+  카테고리별로 어떤 attribute를 라벨링할지 받는다. 에이전트가 생략한 카테고리/
+  attribute는 라벨링하지 **않는다** — 해당 attribute는 empty로 취급되어 트리는
+  그 값 없이 실행된다(empty-safe → 보통 default score, 0 = 부재). 파싱은 알려진
+  카테고리/attribute 이름만 남긴다.
+- **EXTRACT** — 선택된 카테고리마다 호출 1회로 **선택된** attribute만 닫힌 enum /
+  ordinal에 맞춰 value + evidence로 해석한다. 각 attribute의 허용값은
+  **per-value edge-case rule과 함께** 렌더링된다. 선택된 attribute가 없는
+  카테고리는 EXTRACT 호출을 건너뛴다.
+- **DECIDE** — 추출값만으로 코드에서 트리를 **결정적으로** 적용(LLM 호출 없음)해
+  `score`와 **trajectory**(`{selected, extracted, rule_index, rule_note, score}`)를
+  산출한다.
+- **REVIEW** — 카테고리 전체를 대상으로 한 호출 1회로 각 카테고리의 score +
+  trajectory를 주입한다. 모델은 적절성을 판정하지만 **score를 바꿀 수 없다**;
+  `needs_change`를 표시하면 JUDGE는 그 decision-rule 노드를 타깃으로 **rule-change
+  요청을 큐잉**한다 — 큐잉만, 자동 적용 없음.
+- **STORE** — 카테고리당 Label 1개. `evidence_attributes`는 정의된 **모든**
+  attribute를 포함한다: 선택+추출된 것은 value + evidence를 담고
+  (`source=judge/extract`), 선택되지 않은/empty인 것은 EMPTY 값으로 저장된다
+  (`value=""`, `evidence=None`, `source=judge/unselected`) — 다운스트림에서
+  "고려했으나 empty"를 구분할 수 있게. cited pin = 모든 attr-def 노드 + rule 노드;
+  trajectory는 `tool_trace`에 담기고; rationale은 매칭 규칙 note다.
 
 **Holistic 폴백**(합성된 정책이 없는 카테고리, 그리고 bootstrap 중의 *모든*
 카테고리): 멀티모달 호출 1회가 프레임 + summary + ASR에서 직접 카테고리를 채점하며,
