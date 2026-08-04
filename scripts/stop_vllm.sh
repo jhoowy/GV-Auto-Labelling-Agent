@@ -17,5 +17,14 @@ nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/nu
   | grep -i "VLLM" | cut -d',' -f1 | tr -d ' ' | xargs -r kill -9 2>/dev/null || true
 sleep 2
 
+# 3. Omni served from the isolated vllm-omni venv: its stage workers show up in
+# nvidia-smi as the venv's python (not "VLLM"), so match by GPU0 + venv path to
+# avoid touching GPU1's ASR/embedder engines.
+OMNI_VENV="${OMNI_VENV:-/tmp/iji-vllm-omni-venv}"
+for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader --id=0 2>/dev/null | tr -d ' '); do
+  readlink -f "/proc/$pid/exe" 2>/dev/null | grep -q "$OMNI_VENV" && kill -9 "$pid" 2>/dev/null || true
+done
+sleep 2
+
 echo "stopped. GPU compute processes remaining:"
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null || echo "  (none)"

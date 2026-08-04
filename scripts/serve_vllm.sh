@@ -20,7 +20,6 @@ LOGDIR="${VLLM_LOGDIR:-/tmp/vllm-logs}"
 mkdir -p "$LOGDIR"
 
 path_of() { "$PY" -c "import yaml;print(yaml.safe_load(open('config/profiles/local.yaml'))['$1']['model_path'])"; }
-OMNI=$(path_of mllm)
 TEMB=$(path_of text_embedding); VEMB=$(path_of image_embedding)
 
 wait_ready() {  # port name
@@ -34,13 +33,10 @@ wait_ready() {  # port name
   echo "  ✗ $name timeout"; return 1
 }
 
-# GPU0 — Omni 30B (vision+audio summary), independent → start in background.
-CUDA_VISIBLE_DEVICES=0 "$VLLM" serve "$OMNI" --served-model-name omni --port 8801 \
-  --max-model-len 49152 --max-num-batched-tokens 49152 \
-  --mm-processor-kwargs '{"max_pixels":313600,"fps":2.0}' \
-  --limit-mm-per-prompt '{"video":1,"audio":1}' \
-  --gpu-memory-utilization 0.9 --trust-remote-code \
-  > "$LOGDIR/omni.log" 2>&1 &
+# GPU0 — Omni 30B (vision+audio summary). Served from the ISOLATED vllm-omni
+# venv (audio-in-video needs vllm-omni, not stock pip vLLM), independent →
+# start in background. See scripts/serve_omni.sh.
+bash scripts/serve_omni.sh &
 
 # GPU1 — three small models, started one at a time.
 CUDA_VISIBLE_DEVICES=1 "$VLLM" serve "$TEMB" --served-model-name text-embed --port 8803 \

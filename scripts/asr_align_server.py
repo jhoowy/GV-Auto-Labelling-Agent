@@ -34,8 +34,14 @@ def _load():
 
 
 class Req(BaseModel):
-    audio_path: str
-    language: str | None = None
+    audio_paths: list[str]        # batch: the engine must not be called concurrently,
+    language: str | None = None   # so callers send many clips in ONE request instead.
+
+
+def _one(r) -> dict:
+    words = [{"text": u.text, "t_start": u.start_time, "t_end": u.end_time}
+             for u in (r.time_stamps or [])]
+    return {"language": r.language, "text": r.text or "", "words": words}
 
 
 @app.get("/health")
@@ -45,11 +51,14 @@ def health():
 
 @app.post("/transcribe")
 def transcribe(req: Req):
-    langs = [req.language] if req.language else None
-    r = _model.transcribe(audio=[req.audio_path], language=langs, return_time_stamps=True)[0]
-    words = [{"text": u.text, "t_start": u.start_time, "t_end": u.end_time}
-             for u in (r.time_stamps or [])]
-    return {"language": r.language, "text": r.text, "words": words}
+    langs = [req.language] * len(req.audio_paths) if req.language else None
+    try:
+        rs = _model.transcribe(audio=req.audio_paths, language=langs, return_time_stamps=True)
+    except Exception:  # degrade gracefully rather than 500
+        import traceback
+        traceback.print_exc()
+        return [{"language": None, "text": "", "words": []} for _ in req.audio_paths]
+    return [_one(r) for r in rs]
 
 
 if __name__ == "__main__":
