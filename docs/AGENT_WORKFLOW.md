@@ -16,10 +16,11 @@ flowchart LR
 ```
 
 `DERIVE` and `CHECK` from the earlier draft are **absorbed into JUDGE**: for a
-category with a synthesised policy, JUDGE extracts the defined attributes and
-applies its decision-rule tree; for categories still on the holistic fallback it
-derives any structured signals and checks precedent consistency inside the
-judging step. `SIDE_FX` is retained.
+category with a synthesised policy, JUDGE runs an explicit **SELECT → EXTRACT →
+DECIDE → REVIEW → STORE** pipeline (the tree produces the score deterministically;
+REVIEW checks appropriateness but cannot override it); for categories still on the
+holistic fallback it derives any structured signals and checks precedent
+consistency inside the judging step. `SIDE_FX` is retained.
 
 ## Orchestrator model
 
@@ -75,35 +76,58 @@ Tools: storage reads, frame sampler.
 Tools: retrieval only.
 
 ### JUDGE  *(absorbs DERIVE + CHECK)*
-Judging is **per confirm shot, per category**, and takes one of two routes
-depending on whether the category has a synthesised policy:
+Judging is **per confirm shot**. Categories that have a synthesised policy
+(ATTRIBUTE definitions **and** a DECISION_RULE tree, and not bootstrap) run the
+attribute-driven **SELECT → EXTRACT → DECIDE → REVIEW → STORE** pipeline; the rest
+(no synthesised policy, and *every* category during bootstrap) keep the holistic
+fallback. Frames (≤5) are sampled **once per shot** and reused across every call.
 
 ```mermaid
 flowchart TB
-  IN["per confirm shot × category"]
-  IN --> Q{"attribute defs<br/>+ decision-rule tree?<br/>(and not bootstrap)"}
+  IN["per confirm shot"]
+  IN --> Q{"categories with<br/>attribute defs + decision tree?<br/>(and not bootstrap)"}
 
-  Q -->|"yes — attribute-driven"| EX["extract each defined attribute<br/>(value + evidence) from frames ≤5 + summary + ASR"]
-  EX --> AP["apply decision-rule tree deterministically<br/>(priority order; first match wins, else default)"]
-  AP --> SC1["score + rationale (matched-rule note)<br/>evidence_attributes · cited pins (attr-def + rule nodes)"]
-  AP -->|"tree does not fit"| RC["queue rule-change request<br/>(targets the decision-rule node)"]
+  Q -->|"attribute-driven categories"| SEL["SELECT — one call across those categories:<br/>which categories + which attribute NAMES to label"]
+  SEL --> EXT["EXTRACT — one call per selected category:<br/>selected attributes → value + evidence (values shown WITH per-value rules)"]
+  EXT --> DEC["DECIDE — apply decision tree deterministically over<br/>extracted values → score + trajectory (no LLM)"]
+  DEC --> REV["REVIEW — one call across the categories:<br/>judge appropriateness; CANNOT change the score"]
+  REV --> STO["STORE — one Label per category<br/>evidence covers EVERY attr · cited pins (attr-def + rule) · trajectory"]
+  REV -->|"needs_change"| RC["queue rule-change request<br/>(targets the decision-rule node)"]
 
   Q -->|"no policy / bootstrap — holistic"| HD["derive structured signals<br/>(e.g. profanity via term-level word-list on ASR)"]
   HD --> HS["one multimodal scoring call for the N categories<br/>0..5 · rationale · cited pins · evidence"]
   HS --> CK{"compare vs precedents"}
   CK -->|"divergent"| ISS["note precedent_divergence in the decision entry<br/>(no auto re-judge)"]
 
-  EX -.->|"frames insufficient"| EXP["expand_frames → re-extract once"]
+  EXT -.->|"frames insufficient"| EXP["expand_frames → re-extract once"]
   HS -.->|"frames insufficient"| EXP
 ```
 
-**Attribute-driven route** (category has ATTRIBUTE definitions + a DECISION_RULE
-tree): one extraction call per category resolves each defined attribute to a
-value + evidence obeying its closed enum / ordinal, then the tree is applied
-**deterministically** in the code (no scoring call). The first fully-matching
-rule's score wins, else the tree default. If the orchestrator flags the tree does
-not fit (or nothing matched and it reports a gap), JUDGE **queues a rule-change
-request** targeting that decision-rule node — queued, never auto-applied.
+**Attribute-driven pipeline** (categories with ATTRIBUTE definitions + a
+DECISION_RULE tree):
+- **SELECT** — one orchestrator call across all attribute-driven categories,
+  showing each category with its attribute **names only**. It returns which
+  categories are relevant and, per category, which attributes to label. A
+  category/attribute the agent omits is **not** labelled — its attributes are
+  treated as empty and the tree runs without them (empty-safe → typically the
+  default score, 0 = absent). Parsing keeps only known category/attribute names.
+- **EXTRACT** — one call per selected category resolving **only** the selected
+  attributes to a value + evidence obeying its closed enum / ordinal; each
+  attribute's allowed values are rendered **with their per-value edge-case rules**.
+  A category with no selected attributes skips its EXTRACT call.
+- **DECIDE** — the tree is applied **deterministically** in the code (no LLM
+  call) over only the extracted values → a `score` and a **trajectory**
+  (`{selected, extracted, rule_index, rule_note, score}`).
+- **REVIEW** — one call across the categories, injecting each category's score +
+  trajectory. The model judges appropriateness but **cannot change the score**; if
+  it flags `needs_change`, JUDGE **queues a rule-change request** targeting that
+  decision-rule node — queued, never auto-applied.
+- **STORE** — one Label per category. `evidence_attributes` includes **every**
+  defined attribute: selected+extracted ones carry their value + evidence
+  (`source=judge/extract`); unselected/empty ones are stored with an EMPTY value
+  (`value=""`, `evidence=None`, `source=judge/unselected`) so "considered-and-empty"
+  is distinguishable downstream. Cited pins = all attr-def nodes + the rule node;
+  the trajectory rides in `tool_trace`; rationale is the matched-rule note.
 
 **Holistic fallback** (a category with no synthesised policy, and *every* category
 during bootstrap): a single multimodal call scores the categories directly from
