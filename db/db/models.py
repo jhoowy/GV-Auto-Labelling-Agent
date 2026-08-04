@@ -88,6 +88,7 @@ class Policy(Base):
     text: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(2560), nullable=True)
     structured_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    structured_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
 
 
@@ -110,6 +111,7 @@ class PolicyVersion(Base):
     parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     text: Mapped[str] = mapped_column(Text)
     structured_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    structured_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

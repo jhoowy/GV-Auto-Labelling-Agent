@@ -57,6 +57,12 @@ _BOOTSTRAP_SUFFIX = (
     "ATTRIBUTE definition or EDGE_CASE rule. Add a top-level "
     '"policy_gaps":[{{"category":str,"kind":"attribute"|"edge_case",'
     '"suggestion":str,"rationale":str}}] (empty list if none).'
+    " If a category would benefit from a STRUCTURED term list matched by score "
+    "level (e.g. a profanity list where stronger terms map to higher scores), "
+    'also add "structured_attributes":[{{"category":str,"name":str,'
+    '"levels":{{"<score-level>":[terms]}},"description":str}}] (empty list if '
+    "none). Levels are PEGI bands 0..5; a term at level L is evidence toward "
+    "score L for that category."
 )
 
 
@@ -217,7 +223,7 @@ def _judge(state: LabellingState) -> dict:
     retry if it asks), then record precedent divergences as issues on the trace.
     The orchestrator is resolved here, so build_graph() needs no server."""
     from models import get_agent_llm
-    from tools import policy_store
+    from tools import policy_store, retrieval
 
     orch = get_agent_llm()
     cats = _categories()
@@ -238,12 +244,17 @@ def _judge(state: LabellingState) -> dict:
     # canonical (policy_id -> version) pinning source: what was actually retrieved
     version_by_id = {p.policy_id: p.version for p in policies}
 
-    # structured refs (e.g. profanity word lists) attached to policy nodes
-    refs: list[tuple[str, str, int]] = []
+    # DB-managed structured attributes (term lists by score level) per active
+    # category. Not mandatory: if the tree has none, DERIVE emits nothing.
+    term_nodes: list[tuple[str, str, dict, int]] = []
     for cat in cats:
         for node in policy_store.get_policy_tree(cat):
-            if node.structured_ref:
-                refs.append((cat, node.structured_ref, node.version))
+            sd = node.structured_data or {}
+            if sd.get("kind") == "term_levels":
+                prefix = f"{cat}.attr."
+                name = (node.policy_id[len(prefix):]
+                        if node.policy_id.startswith(prefix) else node.policy_id)
+                term_nodes.append((cat, name, sd, node.version))
 
     drafts: list[Label] = []
     proposals: list[dict] = []
@@ -251,14 +262,19 @@ def _judge(state: LabellingState) -> dict:
     for seg in confirm:
         text = asr.get(seg.segment_id, "")
 
-        # DERIVE (absorbed): deterministic policy-layer attributes
+        # DERIVE (absorbed): graded policy-layer attributes from structured term
+        # lists. Per matching node add ONE attribute at the max matched level.
         pattrs: list[Attribute] = []
-        for cat, ref, ver in refs:
-            present = agent_tools.lookup_structured(ref, text)
+        for cat, name, sd, ver in term_nodes:
+            matched = retrieval.match_term_levels(sd, text)
+            if not matched:
+                continue
+            max_level = max(int(lvl) for lvl in matched)
             pattrs.append(Attribute(
-                key=f"{cat}_structured_match", value=bool(present),
+                key=f"{cat}.{name}_level", value=int(max_level),
                 layer=AttributeLayer.POLICY, source="judge/derive",
-                evidence=f"asr:{seg.segment_id}", policy_version=ver,
+                evidence=", ".join(matched.get(str(max_level), [])),
+                policy_version=ver,
             ))
 
         frames = agent_tools.sample_frames(seg, _FRAMES_PER_SHOT)
@@ -280,6 +296,16 @@ def _judge(state: LabellingState) -> dict:
                     "suggestion": g.get("suggestion", "") or "",
                     "rationale": g.get("rationale", "") or "",
                 })
+            # Structured term-level attributes: drafted directly in SIDE_FX (not
+            # queued), so they are tagged separately from free-text gaps.
+            for sa in parsed.get("structured_attributes") or []:
+                proposals.append({"structured_attribute": {
+                    "segment_id": seg.segment_id,
+                    "category": sa.get("category"),
+                    "name": sa.get("name"),
+                    "levels": sa.get("levels") or {},
+                    "description": sa.get("description"),
+                }})
 
         seg_prec = [pr for pr in precedents if pr["segment_id"] == seg.segment_id]
         for j in parsed.get("judgements", []):
@@ -320,6 +346,18 @@ def _side_fx(state: LabellingState) -> dict:
     actions: list[dict] = []
     if state.get("bootstrap"):
         for p in state.get("proposals", []) or []:
+            # Structured attribute: direct upsert (bootstrap drafting), not queued.
+            sa = p.get("structured_attribute")
+            if sa:
+                if sa.get("category") and sa.get("name") and sa.get("levels"):
+                    node = agent_tools.define_structured_attribute(
+                        category=sa["category"], name=sa["name"],
+                        levels=sa["levels"], description=sa.get("description"),
+                    )
+                    actions.append({"define_structured_attribute":
+                                    f"{node.policy_id} levels={sorted(sa['levels'])}"})
+                continue
+            # Free-text gap: still human-gated via the change-request queue.
             cat = p.get("category")
             kind = p.get("kind", "edge_case")
             suggestion = p.get("suggestion", "")

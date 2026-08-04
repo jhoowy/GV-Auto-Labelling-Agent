@@ -10,15 +10,12 @@ run intensively over bootstrap videos, then converged.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from schemas import Category, Policy
 from schemas.enums import PolicyType
 from tools import policy_store
 
 log = logging.getLogger(__name__)
-
-_ROOT = Path(__file__).resolve().parents[2]
 
 
 # PEGI-aligned 0..5 score bands (score: age tier). One SCORING node per
@@ -79,7 +76,9 @@ def seed_from_pegi(categories: list[Category] | None = None) -> None:
 
     Persists one SCORING Policy per category via upsert_policy (deterministic
     id `<category>.scoring`, so re-seeding edits in place rather than
-    duplicating). These nodes are the policy-set v0 baseline.
+    duplicating). These nodes are the policy-set v0 baseline. No ATTRIBUTE
+    nodes are seeded — structured attributes (e.g. a profanity term list by
+    level) are drafted by the agent during bootstrap, not pre-seeded.
     """
     categories = categories or list(_PEGI_RUBRICS.keys())
     for cat in categories:
@@ -94,23 +93,6 @@ def seed_from_pegi(categories: list[Category] | None = None) -> None:
             text=text,
         ))
         log.info("seeded PEGI scoring rubric for %s", cat.value)
-
-    # Structured data (profanity word list) lives outside the human-readable
-    # rubric, attached to a bad_language ATTRIBUTE node via structured_ref so the
-    # agent's DERIVE step can match ASR against it.
-    if Category.BAD_LANGUAGE in categories:
-        wordlist = _ROOT / "data" / "wordlists" / "bad_language.txt"
-        policy_store.upsert_policy(Policy(
-            policy_id="bad_language.profanity_list",
-            type=PolicyType.ATTRIBUTE,
-            category=Category.BAD_LANGUAGE,
-            parent_id="bad_language.scoring",
-            text=("Profanity attribute: presence of profanity or slurs in the "
-                  "shot's ASR is a signal for the bad_language score. The terms "
-                  "live in an external word list (structured_ref), not here."),
-            structured_ref=str(wordlist),
-        ))
-        log.info("seeded bad_language profanity_list ATTRIBUTE node")
 
 
 def _cluster_proposals(reqs: list) -> list[list]:

@@ -102,7 +102,8 @@ class Policy(BaseModel):
     parent_id: str | None = None
     text: str
     embedding: list[float] | None = None
-    structured_ref: str | None = None            # e.g. word-list table/file
+    structured_ref: str | None = None            # legacy pointer (deprecated)
+    structured_data: dict | None = None          # DB-managed structured payload, e.g. term levels
     status: str = "active"
 
 

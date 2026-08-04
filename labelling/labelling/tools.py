@@ -36,6 +36,16 @@ def lookup_structured(ref: str, text: str) -> bool:
     return retrieval.lookup_structured(ref, text)
 
 
+def define_structured_attribute(category: str, name: str,
+                                levels: dict[str, list[str]],
+                                description: str | None = None):
+    """Bootstrap-only skill: draft/edit a structured ATTRIBUTE node (e.g. a
+    profanity term list organised by score level). Directly upserts the node —
+    the whole draft tree is human-reviewed before the policy-set v1 snapshot."""
+    from tools import policy_store
+    return policy_store.upsert_structured_attribute(category, name, levels, description)
+
+
 def expand_window(
     all_segments: list[Segment], lo: int, hi: int, direction: str, n: int
 ) -> list[Segment]:

@@ -33,7 +33,8 @@ def _to_policy(o: "m.Policy") -> Policy:
         policy_id=o.policy_id, type=PolicyType(o.type), category=Category(o.category),
         version=o.version, parent_id=o.parent_id, text=o.text,
         embedding=list(o.embedding) if o.embedding is not None else None,
-        structured_ref=o.structured_ref, status=o.status,
+        structured_ref=o.structured_ref, structured_data=o.structured_data,
+        status=o.status,
     )
 
 
@@ -185,6 +186,12 @@ def _load_word_list(ref: str) -> tuple[str, ...]:
     return tuple(str(x) for x in data)
 
 
+def _term_in_text(term: str, hay: str) -> bool:
+    """Case-insensitive word-boundary match of `term` in already-lowered `hay`."""
+    term = term.strip().lower()
+    return bool(term) and re.search(r"\b" + re.escape(term) + r"\b", hay) is not None
+
+
 def lookup_structured(ref: str, text: str) -> bool:
     """Lookup against a policy's attached data, e.g. a profanity word list.
     True if any resolved term matches `text` (case-insensitive, word-boundary)."""
@@ -194,11 +201,26 @@ def lookup_structured(ref: str, text: str) -> bool:
     if not words:
         return False
     hay = text.lower()
-    for w in words:
-        w = w.strip().lower()
-        if w and re.search(r"\b" + re.escape(w) + r"\b", hay):
-            return True
-    return False
+    return any(_term_in_text(w, hay) for w in words)
+
+
+def match_term_levels(structured_data: dict, text: str) -> dict[str, list[str]]:
+    """Match `text` against a DB-managed term-level payload.
+
+    `structured_data` is a Policy.structured_data dict of the form
+    {"kind":"term_levels","levels":{"<level>":[terms]}}. Returns {level: matched
+    terms} for every level with at least one hit (case-insensitive, word-boundary
+    — same semantics as lookup_structured). Empty/None inputs yield {}."""
+    if not structured_data or not text:
+        return {}
+    levels = structured_data.get("levels") or {}
+    hay = text.lower()
+    out: dict[str, list[str]] = {}
+    for level, terms in levels.items():
+        hits = [t for t in (terms or []) if _term_in_text(str(t), hay)]
+        if hits:
+            out[str(level)] = hits
+    return out
 
 
 # --- Q&A --------------------------------------------------------------------

@@ -35,6 +35,7 @@ def _to_schema(o: "m.Policy") -> Policy:
         text=o.text,
         embedding=o.embedding,
         structured_ref=o.structured_ref,
+        structured_data=o.structured_data,
         status=o.status,
     )
 
@@ -54,6 +55,7 @@ def _ver_to_schema(o: "m.PolicyVersion") -> Policy:
         text=o.text,
         embedding=None,
         structured_ref=o.structured_ref,
+        structured_data=o.structured_data,
         status="active",
     )
 
@@ -127,6 +129,7 @@ def upsert_policy(policy: Policy) -> Policy:
         obj.text = policy.text
         obj.embedding = embedding
         obj.structured_ref = policy.structured_ref
+        obj.structured_data = policy.structured_data
         obj.status = policy.status or "active"
 
         # Append the per-version snapshot (idempotent on policy_id+version).
@@ -140,10 +143,40 @@ def upsert_policy(policy: Policy) -> Policy:
                 policy_id=pid, version=obj.version, type=obj.type,
                 category=obj.category, parent_id=obj.parent_id,
                 text=obj.text, structured_ref=obj.structured_ref,
+                structured_data=obj.structured_data,
             ))
 
         s.commit()
         return _to_schema(obj)
+
+
+def upsert_structured_attribute(
+    category: str,
+    name: str,
+    levels: dict[str, list[str]],
+    description: str | None = None,
+) -> Policy:
+    """Create/edit an ATTRIBUTE node holding structured term-level data.
+
+    The node id is deterministic (`<category>.attr.<name>`) so re-running edits
+    in place and bumps the version. `levels` maps PEGI score band -> terms; a
+    term matched at level L is evidence toward score L for the category. Used by
+    the bootstrap drafting skill; not a human-review-gated change.
+    """
+    cat = getattr(category, "value", category)
+    text = description or (
+        f"Structured '{name}' attribute for {cat}: terms are organised by PEGI "
+        "score level; a term matched at level L is evidence toward score L. The "
+        "term lists live in structured_data, not in this text."
+    )
+    return upsert_policy(Policy(
+        policy_id=f"{cat}.attr.{name}",
+        type=PolicyType.ATTRIBUTE,
+        category=Category(cat),
+        parent_id=f"{cat}.scoring",
+        text=text,
+        structured_data={"kind": "term_levels", "levels": levels},
+    ))
 
 
 def snapshot_policy_set(note: str | None = None) -> PolicySet:
