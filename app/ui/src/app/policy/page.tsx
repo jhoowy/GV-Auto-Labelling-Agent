@@ -274,6 +274,7 @@ function AttributeBody({ sd }: { sd: any }) {
                 <th>value</th>
                 <th>label</th>
                 <th>description</th>
+                <th>rules</th>
                 <th>examples</th>
               </tr>
             </thead>
@@ -281,12 +282,24 @@ function AttributeBody({ sd }: { sd: any }) {
               {values.map((v, i) => {
                 const obj = v && typeof v === "object" ? v : { value: v };
                 const ex = Array.isArray(obj.examples) ? obj.examples : [];
+                const rules = Array.isArray(obj.rules) ? obj.rules : [];
                 return (
                   <tr key={i}>
                     {ordinal && <td className="muted mono">{i}</td>}
                     <td className="mono">{String(obj.value ?? "")}</td>
                     <td>{String(obj.label ?? "")}</td>
                     <td className="small">{String(obj.description ?? "")}</td>
+                    <td className="small">
+                      {rules.length > 0 ? (
+                        <ul style={{ margin: 0, paddingLeft: 16, display: "grid", gap: 3, maxWidth: 360 }}>
+                          {rules.map((r: any, j: number) => (
+                            <li key={j}>{String(r)}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
                     <td className="small muted">
                       {ex.map((e: any) => String(e)).join("; ")}
                     </td>
