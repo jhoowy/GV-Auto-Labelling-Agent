@@ -8,40 +8,42 @@ PoC 범위: PEGI 하위 **Gambling / Bad Language / Sex** 3개 카테고리, 연
 
 ## System Architecture
 
-```
-                 ┌──────────────────────────────────────────────────────────┐
-  YouTube video  │  INGESTION  (fixed MLLM batch — no agent)                 │
-   ids ─────────▶│  fetch(yt-dlp) → segment(30s/1fps) → ASR(transcript)      │
-                 │   → MLLM caption(vision+audio) → embed(text|image) → store │
-                 └───────────────────────────────┬──────────────────────────┘
-                                                 │  Video · Segment · base_attributes
-                                                 ▼
-        ┌──────────────────────────────────────────────────────────────────┐
-        │  STORAGE (Data Warehouse)                                         │
-        │  Postgres + pgvector (dense) + BM25 (lexical)                     │
-        │  blobs → local FS / MinIO (video·keyframes·audio; DB holds ptrs)  │
-        └───────┬───────────────────────────────────────────────┬──────────┘
-                │                                                │
-                ▼                                                ▼
- ┌──────────────────────────────────┐          ┌───────────────────────────────┐
- │  LABELLING AGENT (LangGraph)     │  policy  │  POLICY layer                 │
- │  shot-window sequential:         │◀────────▶│  node tree (Rubric/Attribute/ │
- │  LOAD→RETRIEVE→DERIVE→SCORE→      │  RAG     │  Edge), node ver + set snapshot│
- │  CHECK→SIDE_FX→COMMIT            │          │  change-request queue         │
- │  tools: search_policies,         │          │  bootstrap (PEGI seed → v1)   │
- │   find_similar_segments(precedent),         └───────────────────────────────┘
- │   get_frames, expand_window,     │
- │   revise_ingestion(auto+log),    │  emits Label (full trace):
- │   propose_policy_change(→queue), │  score · rationale · cited_policies ·
- │   emit_label                     │  evidence · used_segments · tool_trace
- └──────────────────────────────────┘
-                │
-                ▼
- ┌──────────────────────────────────────────────────────────────────────────┐
- │  SERVICE LAYER (packages/tools) — one implementation, two callers          │
- │  ├─ FastAPI (app/backend)  → Next.js UI: Data Viewer + Monitoring          │
- │  └─ LangGraph agent tools  (same functions, no duplication)                │
- └──────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  IDS(["YouTube video IDs"])
+
+  subgraph ING["INGESTION · fixed MLLM batch (no agent)"]
+    direction LR
+    F["fetch (yt-dlp)"] --> S["shot segmentation (Omni)"] --> A["ASR transcript"]
+    A --> C["coarse summary + base_attributes"] --> E["embed (text | image)"]
+  end
+
+  STORE[("STORAGE · data warehouse<br/>Postgres + pgvector (dense) + BM25 (lexical)<br/>blobs → FS / MinIO (DB holds pointers)")]
+
+  subgraph LAB["LABELLING AGENT · LangGraph"]
+    direction TB
+    STG["shot-window state machine:<br/>LOAD → RETRIEVE → JUDGE → SIDE_FX → COMMIT"]
+    TLS["tools: search_policies · find_similar_segments (precedent)<br/>· get_frames / expand_frames · lookup_structured<br/>· revise_ingestion (auto+log) · propose_policy_change (→queue) · emit_label"]
+    STG -.-> TLS
+  end
+
+  subgraph POL["POLICY layer"]
+    direction TB
+    PT["versioned node tree (Rubric / Attribute / Edge) + set snapshot"]
+    PQ["change-request queue · bootstrap (PEGI seed → v1)"]
+  end
+
+  subgraph SVC["SERVICE LAYER (packages/tools) · one impl, two callers"]
+    direction TB
+    API["FastAPI (app/backend) → Next.js UI: Data Viewer · Monitoring · Policy"]
+    AT["LangGraph agent tools (same functions, no duplication)"]
+  end
+
+  IDS --> ING --> STORE
+  STORE --> LAB
+  LAB <-->|"policy RAG"| POL
+  LAB -->|"emits Label + full trace:<br/>score · rationale · cited policies · evidence · used_segments · tool_trace"| STORE
+  STORE --> SVC
 ```
 
 ## Layout
