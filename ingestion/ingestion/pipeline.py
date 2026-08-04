@@ -29,8 +29,8 @@ from math import ceil
 from pathlib import Path
 
 from models import base_config, get_asr, get_image_embedder, get_mllm, get_text_embedder
-from schemas import Segment, Utterance, Video, VideoMetadata
-from schemas.enums import VideoStatus
+from schemas import Attribute, Segment, Utterance, Video, VideoMetadata
+from schemas.enums import AttributeLayer, VideoStatus
 from tools import storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,38 +76,33 @@ def _tmp_wav(media: Path, start: float, dur: float) -> str:
 
 
 def _tmp_clip(media: Path, start: float, dur: float) -> str:
+    # -avoid_negative_ts make_zero resets the clip PTS to 0 (without it, -c copy
+    # keeps the source PTS and the model reports out-of-range absolute times).
     fd, path = tempfile.mkstemp(suffix=".mkv")
     os.close(fd)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(start), "-i", str(media),
-                    "-t", str(dur), "-c", "copy", path], check=True)
+                    "-t", str(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", path], check=True)
     return path
-
-
-def _rel(segs: list[dict], base: float) -> list[dict]:
-    return [{"start": s["t_start"] - base, "end": s["t_end"] - base,
-             "summary": s["summary"]} for s in segs]
 
 
 def _merge_utts(utts: list[Utterance], a: float, b: float) -> str:
     return " ".join(u.text for u in utts if u.t_start < b and u.t_end > a)
 
 
-async def _asr_utterances(video_id, media, duration, win_s, asr, sem) -> list[Utterance]:
+async def _asr_utterances(video_id, media, duration, win_s, asr) -> list[Utterance]:
     starts = [i * win_s for i in range(ceil(duration / win_s))]
     wavs = [_tmp_wav(media, st, min(win_s, duration - st)) for st in starts]
+    # One batched request — the ASR engine must not be called concurrently, so
+    # all windows go together and are batched server-side (not serialized).
+    try:
+        results = await asr.transcribe(wavs)
+    finally:
+        for w in wavs:
+            _rm(w)
 
-    async def one(st, wav):
-        async with sem:
-            try:
-                _text, words = await asr.transcribe(wav)
-            finally:
-                _rm(wav)
-        return st, words
-
-    res = await asyncio.gather(*(one(st, w) for st, w in zip(starts, wavs)))
     utts: list[Utterance] = []
-    for st, words in res:
-        for w in words:
+    for st, res in zip(starts, results):
+        for w in res["words"]:
             utts.append(Utterance(video_id=video_id, idx=len(utts),
                                   t_start=w["t_start"] + st, t_end=w["t_end"] + st, text=w["text"]))
     return utts
@@ -125,17 +120,21 @@ async def _omni_segments(media, duration, W, O, omni) -> list[dict]:
     n = len(starts)
 
     clips = [_tmp_clip(media, st, dur) for st, dur in win]
+    auds = [_tmp_wav(media, st, dur) for st, dur in win]
     try:
-        pass1 = await asyncio.gather(*(omni.segment_window(c, dur) for c, (_, dur) in zip(clips, win)))
+        # Omni reports ABSOLUTE times (H:MM:SS.ff) — pass the clip's [start, end].
+        pass1 = await asyncio.gather(*(
+            omni.segment_window(c, st, st + dur, a)
+            for c, a, (st, dur) in zip(clips, auds, win)))
     finally:
-        for c in clips:
-            _rm(c)
+        for p in clips + auds:
+            _rm(p)
 
-    abs_segs = []
+    abs_segs = []  # clamp each window's scenes to its bounds (already absolute)
     for (st, dur), segs in zip(win, pass1):
         aw = []
         for sg in segs:
-            a, b = max(st, st + sg["start"]), min(st + dur, st + sg["end"])
+            a, b = max(st, sg["start"]), min(st + dur, sg["end"])
             if b > a:
                 aw.append({"t_start": a, "t_end": b, "summary": sg["summary"]})
         abs_segs.append(aw)
@@ -157,19 +156,42 @@ async def _omni_segments(media, duration, W, O, omni) -> list[dict]:
                 _append(sg)
         if i < n - 1:
             ov_s, ov_e = starts[i + 1], win_end
-            inside_i = _rel([s for s in abs_segs[i] if s["t_end"] > ov_s], ov_s)
-            inside_j = _rel([s for s in abs_segs[i + 1] if s["t_start"] < ov_e], ov_s)
-            ovc = _tmp_clip(media, ov_s, ov_e - ov_s)
+            inside_i = [s for s in abs_segs[i] if s["t_end"] > ov_s]
+            inside_j = [s for s in abs_segs[i + 1] if s["t_start"] < ov_e]
+            ovc, ova = _tmp_clip(media, ov_s, ov_e - ov_s), _tmp_wav(media, ov_s, ov_e - ov_s)
             try:
-                rec = await omni.reconcile_overlap(ovc, ov_e - ov_s, inside_i, inside_j)
+                rec = await omni.reconcile_overlap(ovc, ov_s, ov_e, inside_i, inside_j, ova)
             finally:
-                _rm(ovc)
+                _rm(ovc); _rm(ova)
             for r in rec:
-                _append({"t_start": ov_s + r["start"], "t_end": ov_s + r["end"],
-                         "summary": r["summary"]})
+                _append({"t_start": r["start"], "t_end": r["end"], "summary": r["summary"]})
     if final:
         final[-1]["t_end"] = duration
     return final
+
+
+def _base_attributes(summary: str | None, asr_text: str, t_start: float, t_end: float) -> list[Attribute]:
+    """Policy-independent raw observations, derived only from data already
+    produced (no extra model call). Deliberately factual, not judgemental —
+    category verdicts are the agent's (policy layer) job.
+
+    NOTE: richer VISION/OCR base attributes (on-screen text, scene objects,
+    logos) would come from a dedicated Omni extraction pass here. Deferred as a
+    deliberate follow-up — it adds an MLLM call per shot (cost).
+    """
+    summary = summary or ""
+    asr_text = asr_text or ""
+    words = asr_text.split()
+    obs: list[tuple[str, str | float | bool]] = [
+        ("has_speech", bool(words)),
+        ("shot_seconds", round(t_end - t_start, 3)),
+        ("asr_word_count", len(words)),
+        ("summary_len", len(summary)),
+    ]
+    return [
+        Attribute(key=k, value=v, layer=AttributeLayer.BASE, source="ingestion")
+        for k, v in obs
+    ]
 
 
 async def _build_segments(video_id, media, bounds, utts, temb, vemb, sem) -> list[Segment]:
@@ -188,6 +210,7 @@ async def _build_segments(video_id, media, bounds, utts, temb, vemb, sem) -> lis
                 segment_id=f"{video_id}_{idx:04d}", video_id=video_id, idx=idx,
                 t_start=b["t_start"], t_end=b["t_end"], clip_blob=clip_key,
                 transcript=transcript or None, summary=b["summary"],
+                base_attributes=_base_attributes(b["summary"], transcript, b["t_start"], b["t_end"]),
                 text_embedding=text_v, image_embedding=vis_v, status="ingested")
 
     return list(await asyncio.gather(*(build(i, b) for i, b in enumerate(bounds))))
@@ -211,7 +234,7 @@ async def ingest_video(video_id: str, concurrency: int = 8) -> Video:
     asr, omni = get_asr(), get_mllm()
     temb, vemb = get_text_embedder(), get_image_embedder()
 
-    utts = await _asr_utterances(video_id, media, duration, cfg["asr_window_seconds"], asr, sem)
+    utts = await _asr_utterances(video_id, media, duration, cfg["asr_window_seconds"], asr)
     bounds = await _omni_segments(media, duration, cfg["omni_window_seconds"],
                                   cfg["omni_overlap_seconds"], omni)
     segments = await _build_segments(video_id, media, bounds, utts, temb, vemb, sem)
@@ -231,3 +254,26 @@ async def ingest_video(video_id: str, concurrency: int = 8) -> Video:
 def build_global_overview(video_id: str) -> str:
     v = storage.get_video(video_id)
     return (v.global_overview or "") if v else ""
+
+
+def backfill_base_attributes(video_id: str | None = None) -> int:
+    """Recompute base_attributes for already-ingested segments and re-save them.
+
+    Model-free: reuses each segment's stored summary and its merged word-level
+    utterances (the same ASR text ingestion would have merged). Scoped to one
+    video, or all videos when video_id is None. Returns the number of segments
+    updated.
+    """
+    video_ids = [video_id] if video_id else [v.video_id for v in storage.list_videos()]
+    updated = 0
+    for vid in video_ids:
+        utts = storage.get_utterances(vid)
+        segments = storage.get_segments(vid)
+        for seg in segments:
+            asr_text = seg.transcript or _merge_utts(utts, seg.t_start, seg.t_end)
+            seg.base_attributes = _base_attributes(
+                seg.summary, asr_text, seg.t_start, seg.t_end)
+        if segments:
+            storage.upsert_segments(segments)
+            updated += len(segments)
+    return updated
