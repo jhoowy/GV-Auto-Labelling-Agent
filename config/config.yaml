@@ -4,6 +4,7 @@
 
 ingestion:
   asr_window_seconds: 30       # window size for ASR passes
+  asr_timeout_seconds: 1800    # HTTP timeout for the whole-video ASR batch (long videos) — #30
   # Omni scene segmentation windows (overlap + reconcile).
   omni_window_seconds: 90
   omni_overlap_seconds: 15
