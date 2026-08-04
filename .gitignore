@@ -14,7 +14,9 @@ venv/
 !.env.example
 
 # Data / blob store (never commit video binaries or extracted media)
-data/
+data/*
+# ...but policy word-lists are structured policy data, not scraped media.
+!data/wordlists/
 blobs/
 *.mp4
 *.mkv
