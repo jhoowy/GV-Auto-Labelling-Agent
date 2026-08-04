@@ -46,6 +46,12 @@ flowchart TB
   STORE --> SVC
 ```
 
+## Documentation
+
+- [ARCHITECTURE](docs/ARCHITECTURE.md) ([한국어](docs/ARCHITECTURE.ko.md)) — system overview, data model (ER), diagrams
+- [DATA_FLOW](docs/DATA_FLOW.md) ([한국어](docs/DATA_FLOW.ko.md)) — how a video becomes labels
+- [AGENT_WORKFLOW](docs/AGENT_WORKFLOW.md) ([한국어](docs/AGENT_WORKFLOW.ko.md)) — the LangGraph state machine
+
 ## Layout
 
 | Path | Role |
@@ -57,7 +63,7 @@ flowchart TB
 | `labelling` | LangGraph orchestrator agent + agent tools |
 | `policy` | bootstrap (PEGI seed → policy-set v1) |
 | `app/backend` | FastAPI (service layer 래핑) |
-| `app/ui` | Next.js (Data Viewer + Monitoring) |
+| `app/ui` | Next.js (Data Viewer · Policy · DB browser) |
 | `db` | SQLAlchemy models + Alembic |
 | `config` | `config.yaml` + `profiles/*.yaml` (proprietary ↔ local vLLM) |
 
