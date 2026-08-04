@@ -177,8 +177,20 @@ def _val_eq(a, b) -> bool:
     return str(a).strip().lower() == str(b).strip().lower()
 
 
-def _match_cond(cond: dict, values: dict) -> bool:
-    """One decision-tree condition against the extracted attribute values."""
+def _ordinal_rank(keys: list, val) -> int | None:
+    """Position of `val` in an ascending ordinal value list (case-insensitive)."""
+    target = str(val).strip().lower()
+    for i, k in enumerate(keys):
+        if str(k).strip().lower() == target:
+            return i
+    return None
+
+
+def _match_cond(cond: dict, values: dict, order: dict | None = None) -> bool:
+    """One decision-tree condition against the extracted attribute values.
+
+    `order` maps an ordinal attribute name to its ascending value keys, so `>=`
+    / `<=` on a non-numeric ordinal compares by position in that order."""
     attr = cond.get("attribute")
     op = cond.get("op")
     target = cond.get("value")
@@ -192,8 +204,13 @@ def _match_cond(cond: dict, values: dict) -> bool:
         return _val_eq(v, target)
     if op in (">=", "<="):
         a, b = _as_num(v), _as_num(target)
-        if a is None or b is None:
-            return False
+        if a is None or b is None:  # non-numeric -> fall back to ordinal ranking
+            keys = (order or {}).get(attr)
+            if not keys:
+                return False
+            a, b = _ordinal_rank(keys, v), _ordinal_rank(keys, target)
+            if a is None or b is None:
+                return False
         return a >= b if op == ">=" else a <= b
     if op == "in":
         opts = target if isinstance(target, (list, tuple, set)) else [target]
@@ -201,14 +218,15 @@ def _match_cond(cond: dict, values: dict) -> bool:
     return False
 
 
-def _apply_decision_tree(rules: list, default: int,
-                         values: dict) -> tuple[int, dict | None]:
+def _apply_decision_tree(rules: list, default: int, values: dict,
+                         order: dict | None = None) -> tuple[int, dict | None]:
     """Evaluate a priority-ordered decision tree against extracted attribute
     values. First rule whose every `when` condition matches wins; otherwise the
-    default. Returns (clamped score, matched rule | None)."""
+    default. `order` supplies ascending value keys for ordinal attributes so
+    rules can compare with `>=`. Returns (clamped score, matched rule | None)."""
     for rule in rules or []:
         conds = rule.get("when") or []
-        if all(_match_cond(c, values) for c in conds):
+        if all(_match_cond(c, values, order) for c in conds):
             return _clamp(rule.get("score", default)), rule
     return _clamp(default), None
 
@@ -385,15 +403,25 @@ def _judge_attribute_driven(orch, state, seg, asr, frames, cat, defs, rule_node)
     """Extract each defined attribute for the shot, then apply the category's
     decision tree deterministically. Returns (Label, rule-change proposal|None)."""
     def_by_name: dict[str, object] = {}
+    order: dict[str, list] = {}
     lines: list[str] = []
     for d in defs:
         name = d.policy_id.split(".attr.", 1)[1] if ".attr." in d.policy_id else d.policy_id
         def_by_name[name] = d
         sd = d.structured_data or {}
+        vals = sd.get("values") or []
+        keys = [v.get("value") if isinstance(v, dict) else v for v in vals]
+        if sd.get("value_type") == "ordinal" and keys:
+            order[name] = keys  # ascending -> lets rules compare with >=
         line = f"- {name} ({sd.get('value_type', '')})"
-        if sd.get("values"):
-            line += f" one of {sd['values']}"
-        lines.append(line + f": {sd.get('guidelines', d.text)}")
+        if vals:
+            rendered = "; ".join(
+                f"{v.get('value')} — {v.get('description', '')}".rstrip(" —")
+                if isinstance(v, dict) else str(v)
+                for v in vals
+            )
+            line += f" — pick one of: {rendered}"
+        lines.append(line + f"\n    detect: {sd.get('guidelines', d.text)}")
 
     system = _EXTRACT_SYS.format(cat=cat)
     prompt = _extract_prompt(state, seg, asr, cat, "\n".join(lines))
@@ -408,7 +436,8 @@ def _judge_attribute_driven(orch, state, seg, asr, frames, cat, defs, rule_node)
 
     tree = rule_node.structured_data or {}
     rules = tree.get("rules") or []
-    score, matched = _apply_decision_tree(rules, tree.get("default", 0), values)
+    score, matched = _apply_decision_tree(
+        rules, tree.get("default", 0), values, order)
 
     # evidence_attributes: one policy-layer Attribute per extracted defined attr.
     evidence: list[Attribute] = []

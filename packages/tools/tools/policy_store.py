@@ -180,6 +180,31 @@ def upsert_structured_attribute(
     ))
 
 
+def _coerce_values(values: list | None) -> list[dict] | None:
+    """Normalise a `values` enum into the rich dict form.
+
+    Each value becomes `{"value","label","description","examples"}`. A plain
+    `list[str]` (legacy callers) is coerced with value=label=str and empty
+    copy; a list of dicts is filled in for any missing keys. `None` stays None
+    (boolean / unbounded attributes carry no closed value set)."""
+    if not values:
+        return None
+    out: list[dict] = []
+    for v in values:
+        if isinstance(v, dict):
+            val = str(v.get("value", v.get("label", "")))
+            out.append({
+                "value": val,
+                "label": str(v.get("label", val)),
+                "description": str(v.get("description", "") or ""),
+                "examples": list(v.get("examples") or []),
+            })
+        else:
+            s = str(v)
+            out.append({"value": s, "label": s, "description": "", "examples": []})
+    return out
+
+
 def upsert_attribute_definition(
     category: str,
     name: str,
@@ -192,13 +217,20 @@ def upsert_attribute_definition(
     """Create/edit an ATTRIBUTE node holding an attribute *definition*.
 
     The node id is deterministic (`<category>.attr.<name>`), parented under the
-    scoring rubric. `value_type` is one of boolean/categorical/level/count;
-    `values` enumerates the allowed values for categorical/level types.
-    `guidelines` describe how to detect the attribute from a shot;
-    `scores_informed` are the PEGI score bands this attribute is evidence for.
-    Reuses the versioned upsert path (bump + history)."""
+    scoring rubric. `value_type` is one of boolean/categorical/ordinal; `values`
+    is a closed enum, stored as a list of
+    `{"value","label","description","examples"}` dicts (a plain `list[str]` is
+    coerced to that form). For `ordinal`, values are kept in ascending order so
+    rules can compare with `>=`. `guidelines` describe how to detect the
+    attribute from a shot; `scores_informed` are the PEGI score bands this
+    attribute is evidence for. Reuses the versioned upsert path (bump +
+    history)."""
     cat = getattr(category, "value", category)
     scores = [int(s) for s in scores_informed]
+    coerced = _coerce_values(values)
+    # Fold a flat top-level `examples` (legacy callers) into the first value.
+    if examples and coerced:
+        coerced[0]["examples"] = list(coerced[0]["examples"]) + list(examples)
     text = (
         f"Attribute '{name}' ({value_type}) for {cat}. {guidelines} "
         f"Informs scores: {', '.join(str(s) for s in scores) or 'none'}."
@@ -212,10 +244,9 @@ def upsert_attribute_definition(
         structured_data={
             "kind": "attribute_def",
             "value_type": value_type,
-            "values": values,
+            "values": coerced,
             "guidelines": guidelines,
             "scores_informed": scores,
-            "examples": examples or [],
         },
     ))
 
