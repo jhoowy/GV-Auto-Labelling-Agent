@@ -18,9 +18,10 @@ class AttributeLayer(str, Enum):
 class PolicyType(str, Enum):
     """Kinds of policy node within a category tree."""
 
-    SCORING = "scoring"      # score-band rubric (0..5)
-    ATTRIBUTE = "attribute"  # definition of a policy attribute
-    EDGE_CASE = "edge_case"  # incremental edge-case rule
+    SCORING = "scoring"            # score-band rubric (0..5)
+    ATTRIBUTE = "attribute"        # definition of a policy attribute
+    EDGE_CASE = "edge_case"        # incremental edge-case rule
+    DECISION_RULE = "decision_rule"  # attribute-based decision rule tree
 
 
 class VideoStatus(str, Enum):
