@@ -6,8 +6,20 @@ models: text = 2560 (Qwen3-Embedding-4B), visual = 2048 (Qwen3-VL-Embedding-2B).
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -79,6 +91,28 @@ class Policy(Base):
     status: Mapped[str] = mapped_column(String, default="active")
 
 
+class PolicyVersion(Base):
+    """Append-only per-version history of policy nodes.
+
+    `policies` holds only the current row per policy_id; each `upsert_policy`
+    also appends the corresponding snapshot here so a label's (policy_id,
+    version) pin can be resolved to the exact text it used, even after bumps.
+    """
+
+    __tablename__ = "policy_versions"
+    __table_args__ = (UniqueConstraint("policy_id", "version", name="uq_policy_versions_id_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    policy_id: Mapped[str] = mapped_column(String, index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String)
+    category: Mapped[str] = mapped_column(String)
+    parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    text: Mapped[str] = mapped_column(Text)
+    structured_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class PolicySet(Base):
     __tablename__ = "policy_sets"
     version: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -91,6 +125,8 @@ class PolicyChangeRequest(Base):
     req_id: Mapped[str] = mapped_column(String, primary_key=True)
     proposed_change: Mapped[str] = mapped_column(Text)
     rationale: Mapped[str] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    node_type: Mapped[str | None] = mapped_column(String, nullable=True)
     affected_segments: Mapped[list] = mapped_column(JSONB, default=list)
     similar_policies: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[str] = mapped_column(String, default="queued", index=True)

@@ -120,6 +120,8 @@ class PolicyChangeRequest(BaseModel):
     req_id: str
     proposed_change: str
     rationale: str
+    category: str | None = None          # target category of the proposed node
+    node_type: str | None = None         # "attribute" | "edge_case" to materialise
     affected_segments: list[str] = Field(default_factory=list)
     similar_policies: list[str] = Field(default_factory=list)
     status: ChangeRequestStatus = ChangeRequestStatus.QUEUED
