@@ -37,8 +37,10 @@ ROOT = Path(__file__).resolve().parents[2]
 BLOB = Path(os.getenv("BLOB_LOCAL_DIR", ROOT / "blobs"))
 MEDIA = BLOB / "media"
 MANIFEST = ROOT / "data" / "manifest" / "ingest_ready.jsonl"
+METADATA = ROOT / "data" / "manifest" / "metadata.jsonl"
 
 _manifest: dict[str, dict] | None = None
+_metadata: dict[str, dict] | None = None
 
 
 def _manifest_row(video_id: str) -> dict:
@@ -50,6 +52,22 @@ def _manifest_row(video_id: str) -> dict:
                 r = json.loads(line)
                 _manifest[r["video_id"]] = r
     return _manifest.get(video_id, {})
+
+
+def _video_language(video_id: str) -> str | None:
+    """Audio-language ISO code from the fetched metadata manifest, if present.
+    ingest_ready.jsonl has no language; metadata.jsonl does. This survives
+    ingestion (unlike the DB metadata_json, which upsert_video can overwrite)."""
+    global _metadata
+    if _metadata is None:
+        _metadata = {}
+        if METADATA.exists():
+            for line in METADATA.read_text().splitlines():
+                if line.strip():
+                    r = json.loads(line)
+                    _metadata[r["video_id"]] = r
+    r = _metadata.get(video_id, {})
+    return r.get("default_audio_language") or r.get("default_language")
 
 
 def _probe_duration(path: Path) -> float:
@@ -89,13 +107,24 @@ def _merge_utts(utts: list[Utterance], a: float, b: float) -> str:
     return " ".join(u.text for u in utts if u.t_start < b and u.t_end > a)
 
 
-async def _asr_utterances(video_id, media, duration, win_s, asr) -> list[Utterance]:
+# Qwen3-ASR expects a full English language name, not an ISO code; passing the
+# known language avoids auto-detect mislabelling (e.g. Korean audio -> Chinese).
+_ASR_LANG = {"en": "English", "ko": "Korean", "ja": "Japanese",
+             "vi": "Vietnamese", "zh": "Chinese"}
+
+
+def _asr_language(code: str | None) -> str | None:
+    return _ASR_LANG.get(code.split("-")[0].lower()) if code else None
+
+
+async def _asr_utterances(video_id, media, duration, win_s, asr,
+                          language: str | None = None) -> list[Utterance]:
     starts = [i * win_s for i in range(ceil(duration / win_s))]
     wavs = [_tmp_wav(media, st, min(win_s, duration - st)) for st in starts]
     # One batched request — the ASR engine must not be called concurrently, so
     # all windows go together and are batched server-side (not serialized).
     try:
-        results = await asr.transcribe(wavs)
+        results = await asr.transcribe(wavs, language=language)
     finally:
         for w in wavs:
             _rm(w)
@@ -234,7 +263,8 @@ async def ingest_video(video_id: str, concurrency: int = 8) -> Video:
     asr, omni = get_asr(), get_mllm()
     temb, vemb = get_text_embedder(), get_image_embedder()
 
-    utts = await _asr_utterances(video_id, media, duration, cfg["asr_window_seconds"], asr)
+    lang = _asr_language(_video_language(video_id))
+    utts = await _asr_utterances(video_id, media, duration, cfg["asr_window_seconds"], asr, lang)
     bounds = await _omni_segments(media, duration, cfg["omni_window_seconds"],
                                   cfg["omni_overlap_seconds"], omni)
     segments = await _build_segments(video_id, media, bounds, utts, temb, vemb, sem)
