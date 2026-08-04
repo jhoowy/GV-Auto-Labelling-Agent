@@ -10,9 +10,17 @@ import { AsyncState, Badge, fmtTime } from "../../components/ui";
 
 const PAGE_SIZE = 24;
 
+// Dataset tabs; "" = all datasets. Values match metadata_json->>'dataset'.
+const DATASETS: { label: string; value: string }[] = [
+  { label: "All", value: "" },
+  { label: "game_rating", value: "game_rating" },
+  { label: "general_game_video", value: "general_game_video" },
+];
+
 export default function ViewerList() {
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
+  const [dataset, setDataset] = useState("");
   const [page, setPage] = useState(1);
 
   // debounce the search box, and reset to page 1 on a new query
@@ -25,8 +33,8 @@ export default function ViewerList() {
   }, [input]);
 
   const { data, loading, error } = useAsync(
-    () => listVideos({ search, page, page_size: PAGE_SIZE }),
-    [search, page],
+    () => listVideos({ search, page, page_size: PAGE_SIZE, dataset: dataset || undefined }),
+    [search, page, dataset],
   );
 
   const items = data?.items ?? [];
@@ -38,6 +46,24 @@ export default function ViewerList() {
       <div className="row spread">
         <h1>Data Viewer</h1>
         {total > 0 && <span className="muted small">{total} videos</span>}
+      </div>
+
+      {/* Dataset filter tabs — changing resets to page 1 */}
+      <div className="row" style={{ gap: 8 }}>
+        {DATASETS.map((d) => (
+          <button
+            key={d.value}
+            className="btn"
+            aria-pressed={dataset === d.value}
+            style={dataset === d.value ? { fontWeight: 600, borderColor: "currentColor" } : undefined}
+            onClick={() => {
+              setDataset(d.value);
+              setPage(1);
+            }}
+          >
+            {d.label}
+          </button>
+        ))}
       </div>
 
       <div style={{ maxWidth: 420 }}>

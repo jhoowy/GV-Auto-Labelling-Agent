@@ -10,10 +10,18 @@ router = APIRouter(prefix="/api", tags=["data"])
 
 
 @router.get("/videos")
-def list_videos(search: str | None = None, page: int = 1, page_size: int = 24):
+def list_videos(
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 24,
+    dataset: str | None = None,
+):
     """Paginated video gallery: title/duration/status/thumbnail + segment count.
-    Case-insensitive title substring search via `search`."""
-    return storage.list_videos_page(search=search, page=page, page_size=page_size)
+    Case-insensitive title substring search via `search`; optional `dataset`
+    filters on metadata_json->>'dataset'."""
+    return storage.list_videos_page(
+        search=search, page=page, page_size=page_size, dataset=dataset
+    )
 
 
 @router.get("/videos/{video_id}")

@@ -55,12 +55,14 @@ export const listVideos = (params: {
   search?: string;
   page?: number;
   page_size?: number;
+  dataset?: string;
 } = {}) =>
   api<Paginated<VideoListItem>>(
     `/api/videos${qs({
       search: params.search,
       page: params.page,
       page_size: params.page_size,
+      dataset: params.dataset,
     })}`,
   );
 
