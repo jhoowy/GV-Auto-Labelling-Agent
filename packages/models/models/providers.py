@@ -28,6 +28,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from .config import role_spec
+from .tracing import observe
 
 _SEGMENT_SYS = (
     "You segment a video into contiguous, semantically coherent scenes based on "
@@ -294,6 +295,7 @@ class GeminiOrchestrator:
         )
         return resp.text or ""
 
+    @observe(name="gemini.judge", as_type="generation")
     def judge(self, system: str, prompt: str, frames: list[bytes] | None = None) -> str:
         from google.genai import types
 
@@ -302,6 +304,7 @@ class GeminiOrchestrator:
             parts.append(types.Part.from_bytes(data=fb, mime_type="image/jpeg"))
         return self._generate(system, parts, json_out=True)
 
+    @observe(name="gemini.invoke", as_type="generation")
     def invoke(self, prompt) -> str:
         from google.genai import types
 
@@ -319,6 +322,7 @@ class OpenAIPolicyAuthor:
         spec = role_spec("policy_llm", profile_name)
         self.model = spec["model"]
 
+    @observe(name="gpt.policy_author", as_type="generation")
     def complete_json(self, system: str, user: str) -> dict:
         import os
 

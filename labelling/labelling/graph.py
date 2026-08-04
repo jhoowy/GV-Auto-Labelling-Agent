@@ -679,7 +679,21 @@ def label_video(video_id: str, bootstrap: bool = False) -> None:
     }
     n_windows = max(1, math.ceil(len(segments) / max(1, stride)))
     graph = build_graph()
-    graph.invoke(init, config={"recursion_limit": n_windows * 6 + 10})
+
+    # Langfuse tracing (opt-in): one trace per video, a span per graph node.
+    # `handler` is None when tracing is off, so callbacks stays empty.
+    from models.tracing import flush, get_langfuse_handler
+
+    handler = get_langfuse_handler()
+    config: dict = {"recursion_limit": n_windows * 6 + 10}
+    if handler is not None:
+        config["callbacks"] = [handler]
+        config["run_name"] = f"label_video:{video_id}"
+        config["metadata"] = {"video_id": video_id, "bootstrap": bootstrap}
+    try:
+        graph.invoke(init, config=config)
+    finally:
+        flush()
 
     from schemas.enums import VideoStatus
     storage.set_video_status(video_id, VideoStatus.LABELLED.value)

@@ -285,6 +285,13 @@ pytest                                                  # 45 pure-helper tests
 `MODEL_PROFILE=local` is the wired profile; set `GENAI_API_KEY` for the Gemini
 orchestrator. `regular` is a proprietary template and is not wired.
 
+**Observability (optional).** Labelling is traced with **Langfuse** when
+`LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` (self-hosted: also `LANGFUSE_HOST`)
+are set — one trace per `label_video` run, a span per LangGraph node, and nested
+generation spans for the direct-SDK LLM calls (Gemini orchestrator, GPT policy
+author). With the env unset, `models.tracing` degrades to a no-op and nothing is
+sent (`packages/models/tracing.py`).
+
 ## Testing
 
 `tests/` covers pure, DB-free helpers — score clamping, lenient JSON parse, ASR
