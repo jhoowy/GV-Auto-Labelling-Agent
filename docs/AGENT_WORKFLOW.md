@@ -15,9 +15,11 @@ flowchart LR
   COMMIT -->|"cursor ≥ n (done)"| E((end))
 ```
 
-`DERIVE` and `CHECK` from the earlier draft are **absorbed into JUDGE** (policy
-attributes are derived and precedent consistency is checked inside the judging
-step). `SIDE_FX` is retained.
+`DERIVE` and `CHECK` from the earlier draft are **absorbed into JUDGE**: for a
+category with a synthesised policy, JUDGE extracts the defined attributes and
+applies its decision-rule tree; for categories still on the holistic fallback it
+derives any structured signals and checks precedent consistency inside the
+judging step. `SIDE_FX` is retained.
 
 ## Orchestrator model
 
@@ -59,41 +61,74 @@ Populate `window` from `all_segments[cursor : cursor + window_size]`; the head
 `window_stride` shots are the **confirm** shots (committed this step), the rest
 are neighbour context. Merge `utterances` overlapping each shot's `[t_start,
 t_end]` into its ASR text. Sample ≤ 5 uniform frames per confirm shot from
-`clip_blob`. Reset a fresh `tool_trace` for the step. Tools: storage reads,
-frame sampler.
+`clip_blob`. A run-scoped stage `tool_trace` is reset per step for debugging; it
+is **not** what a label carries — a label's audit trail is set in JUDGE (below).
+Tools: storage reads, frame sampler.
 
 ### RETRIEVE
 - `search_policies` — hybrid (pgvector dense + BM25) over the policy nodes for
-  the active categories (rubric / attribute / edge-case).
+  the active categories (scoring rubric / attribute definitions / decision rule /
+  edge-case).
 - `find_similar_segments` — nearest shots + **their confirmed labels**
   (precedent lookup; the primary consistency signal).
 
 Tools: retrieval only.
 
 ### JUDGE  *(absorbs DERIVE + CHECK)*
-A single multimodal call per confirm shot to the orchestrator, then bookkeeping:
+Judging is **per confirm shot, per category**, and takes one of two routes
+depending on whether the category has a synthesised policy:
 
 ```mermaid
 flowchart TB
-  IN["frames ≤5 + summary + ASR text<br/>+ retrieved policies + precedent labels"]
-  IN --> DER["derive policy-layer attributes<br/>(e.g. profanity via word-list on ASR)"]
-  DER --> SC["score each of N categories:<br/>0..5 · rationale · (policy_id, version) pins · evidence"]
-  SC --> CK{"compare vs precedents"}
-  CK -->|"divergent"| ISS["log precedent_divergence issue<br/>(no auto re-judge)"]
-  CK -->|"frames insufficient"| EXP["expand_frames → re-judge shot once"]
+  IN["per confirm shot × category"]
+  IN --> Q{"attribute defs<br/>+ decision-rule tree?<br/>(and not bootstrap)"}
+
+  Q -->|"yes — attribute-driven"| EX["extract each defined attribute<br/>(value + evidence) from frames ≤5 + summary + ASR"]
+  EX --> AP["apply decision-rule tree deterministically<br/>(priority order; first match wins, else default)"]
+  AP --> SC1["score + rationale (matched-rule note)<br/>evidence_attributes · cited pins (attr-def + rule nodes)"]
+  AP -->|"tree does not fit"| RC["queue rule-change request<br/>(targets the decision-rule node)"]
+
+  Q -->|"no policy / bootstrap — holistic"| HD["derive structured signals<br/>(e.g. profanity via term-level word-list on ASR)"]
+  HD --> HS["one multimodal scoring call for the N categories<br/>0..5 · rationale · cited pins · evidence"]
+  HS --> CK{"compare vs precedents"}
+  CK -->|"divergent"| ISS["note precedent_divergence in the decision entry<br/>(no auto re-judge)"]
+
+  EX -.->|"frames insufficient"| EXP["expand_frames → re-extract once"]
+  HS -.->|"frames insufficient"| EXP
 ```
 
-Structured output is **not** forced; the model returns JSON-ish text that is
-parsed leniently. Consistency divergences are **recorded as issues** for a human
-manager to group and adjudicate later — never auto-corrected.
-Tools: `expand_frames`, `lookup_structured`, orchestrator call.
+**Attribute-driven route** (category has ATTRIBUTE definitions + a DECISION_RULE
+tree): one extraction call per category resolves each defined attribute to a
+value + evidence obeying its closed enum / ordinal, then the tree is applied
+**deterministically** in the code (no scoring call). The first fully-matching
+rule's score wins, else the tree default. If the orchestrator flags the tree does
+not fit (or nothing matched and it reports a gap), JUDGE **queues a rule-change
+request** targeting that decision-rule node — queued, never auto-applied.
+
+**Holistic fallback** (a category with no synthesised policy, and *every* category
+during bootstrap): a single multimodal call scores the categories directly from
+frames + summary + ASR, deriving any structured term-level signals first and
+noting precedent divergence in the decision entry.
+
+Structured output is **not** forced; the model returns JSON-ish text parsed
+leniently. Consistency divergences are **recorded**, not auto-corrected.
+Tools: `sample_frames` / `expand_frames`, `search_policies` results, the policy
+tree, orchestrator call.
 
 ### SIDE_FX
-Reachable side effects (only from here):
-- `revise_ingestion` — auto-applied correction to ingestion output; the original
-  is preserved with a revision log.
+Dispatches the proposals JUDGE produced, by shape (reachable only from here):
 - `propose_policy_change` — **always queued** for human approval; never
-  auto-applied.
+  auto-applied. Covers both attribute-driven **rule-change requests**
+  (`node_type=decision_rule`, `target_policy_id` = the rule node) and bootstrap
+  free-text gap proposals (`node_type` = attribute / edge_case).
+- `define_structured_attribute` — a **bootstrap-only direct upsert** drafting a
+  structured term-level ATTRIBUTE node (not human-gated; the whole draft tree is
+  reviewed before the policy-set v1 snapshot).
+
+On approval a queued request **materialises** into an ATTRIBUTE / EDGE_CASE node
+under the category's scoring rubric (`resolve_change_request`). A content
+change-history / revision log for edited attributes or summaries is a planned
+follow-up, not yet built.
 
 ### COMMIT
 Persist each draft `Label` (`storage.save_label`) and update the rolling
@@ -102,15 +137,21 @@ Persist each draft `Label` (`storage.save_label`) and update the rolling
 
 ## Issues log
 
-Beyond the per-label rationale, the agent records **issues** — structured notes
-for human review — into the trace, e.g. `precedent_divergence` and
-low-confidence judgements. These are meant to be **grouped and triaged by a
-human manager**, not acted on automatically. (Broader capability gaps such as
-missing audio input are tracked as **repository issues**, not per-run trace notes.)
+Beyond the per-label rationale, the holistic route records **precedent_divergence**
+inside the label's compact `decision` entry when a score disagrees sharply with
+similar shots' confirmed labels — retained for a human manager to group and
+triage, never auto-corrected. (Broader capability gaps such as missing audio
+input are tracked as **repository issues**, not per-run trace notes.)
 
 ## Output contract
 
 Each judged shot yields `Label` rows (see `packages/schemas`): `category`,
 `score`, `rationale`, `cited_policy_ids`, `evidence_attributes`,
-`used_segment_ids`, `tool_trace`, `confidence`. The `(policy_id, version)` pins
-plus the trace make every label reproducible and auditable.
+`used_segment_ids`, `tool_trace`, `confidence`. A label's audit trail is its
+**evidence_attributes** (extracted attributes with evidence + the attribute
+node's version), its **cited_policy_ids** as canonical `(policy_id, version)` pins
+(attribute-def nodes + the rule node, hallucinated ids dropped and true versions
+re-attached), and the matched-rule note carried in the rationale. `tool_trace`
+keeps only a single compact `{"decision": …}` entry — the old verbose per-stage /
+per-tool dump was removed. Those pins resolve through the `policy_versions`
+history to the exact text used, making every label reproducible and auditable.

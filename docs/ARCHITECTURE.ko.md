@@ -31,7 +31,7 @@ flowchart TB
   end
 
   subgraph POL["POLICY · 버전된 노드 트리"]
-    PT["rubric / attribute / edge-case<br/>+ 버전 히스토리 + set 스냅샷"]
+    PT["scoring 루브릭 / attribute def / decision rule / edge-case<br/>+ 버전 히스토리 + set 스냅샷"]
     PQ["변경요청 큐 → materialise"]
   end
 
@@ -45,7 +45,7 @@ flowchart TB
   IDS --> ING --> STORE
   STORE --> LAB
   LAB <-->|"policy RAG + 선례"| POL
-  LAB -->|"labels + full trace"| STORE
+  LAB -->|"labels + evidence + pins"| STORE
   STORE --> SVC
   POL --> SVC
   API --> UI
@@ -115,6 +115,7 @@ erDiagram
     int score
     text rationale
     jsonb cited_policy_ids
+    jsonb evidence_attributes
     jsonb tool_trace
     float confidence
   }
@@ -125,13 +126,17 @@ erDiagram
     int version
     string parent_id
     text text
-    string structured_ref
+    jsonb structured_data
   }
   POLICY_VERSIONS {
     int id PK
     string policy_id
     int version
+    string type
+    string category
     text text
+    jsonb structured_data
+    datetime created_at
   }
   POLICY_SETS {
     int version PK
@@ -143,6 +148,7 @@ erDiagram
     text proposed_change
     string category
     string node_type
+    string target_policy_id
     string status
   }
 ```
@@ -165,7 +171,11 @@ flowchart LR
 ```
 
 경계는 여기서 확정된다(에이전트는 바꾸지 않음). Omni 분할기는 향후 전용 shot-cut
-모델로 교체될 의도적 placeholder다.
+모델로 교체될 의도적 placeholder다. `base_attributes`는 이미 생성된 데이터에서
+계산하는 모델 없는 사실이다(`has_speech`, `shot_seconds`, `asr_word_count`,
+`summary_len`) — 더 이상 공백이 아니다. ASR은 수집된 메타데이터에서 온 **언어
+힌트**(ISO 코드 → 정식 영어 이름)를 받아 auto-detect가 비영어 오디오를 오분류하지
+않도록 한다.
 
 ## Labelling 에이전트 (LangGraph)
 
@@ -177,27 +187,47 @@ flowchart LR
 ```
 
 shot window가 슬라이딩(`size 5 / stride 3`)하며 롤링 carry-over 요약과 항상 주입되는
-global overview를 함께 쓴다. **JUDGE**는 멀티모달 호출 1회(프레임 ≤5 + summary +
-ASR + 검색 정책 + 선례)로 **N개 설정 가능 카테고리**를 채점하고 policy attribute를
-파생하며 선례 배치를 trace issue로 기록한다. 단계/도구 상세는
+global overview를 함께 쓴다. **JUDGE**는 shot × 카테고리마다 두 경로 중 하나를
+탄다: **attribute definition + 결정 규칙 트리**가 있는 카테고리는 정의된 각
+attribute를 ≤5 프레임 + summary + ASR에서 추출(value + evidence)한 뒤 트리를
+**결정적으로** 적용해 점수를 낸다. 합성된 정책이 없는 카테고리 — 그리고 bootstrap
+중의 모든 카테고리 — 는 **holistic 멀티모달 폴백**(채점 호출 1회)을 쓴다. 라벨의
+provenance는 `evidence_attributes`, 정규 `(policy_id, version)` pin, 매칭 규칙
+note이며, `tool_trace`에는 compact `decision` 항목만 남는다. 단계/도구 상세는
 [AGENT_WORKFLOW.ko.md](AGENT_WORKFLOW.ko.md) 참고.
 
 ## 정책 트리 & bootstrap 루프
 
+한 카테고리의 정책은 카테고리 루트 아래 각각 버전된 세 부분이다: **scoring
+루브릭**(SCORING), **attribute definition**(ATTRIBUTE — 일반적 관측 신호: 값별
+label/description/examples를 가진 닫힌 enum 또는 ordinal, 탐지 guideline, 그리고
+정보를 주는 score 밴드; `structured_data.kind = attribute_def`), **결정 규칙
+트리**(DECISION_RULE — `structured_data.kind = decision_tree`, `default`와
+우선순위 순 `rules`; 첫 완전 매칭 규칙 win, 없으면 default), 그리고 점진적
+EDGE_CASE 노드. 모든 노드는 버전되며 편집마다 `policy_versions` 스냅샷을 append하여
+라벨의 `(policy_id, version)` pin이 정확한 텍스트를 재현한다.
+
 ```mermaid
 flowchart TB
-  SEED["PEGI 루브릭 시드 (v0)<br/>+ 욕설 word-list ATTRIBUTE"] --> RUN
-  RUN["bootstrap 영상 라벨링<br/>(precedent 검색 OFF)"] --> GAP["에이전트가 정책 gap 제안"]
+  SEED["PEGI scoring 루브릭 시드 (v0)"] --> RUN["bootstrap 영상 라벨링<br/>(precedent 검색 OFF)"]
+  RUN --> SYN["카테고리별 합성:<br/>attribute def + 결정 규칙 트리<br/>(draft 노드)"]
+  RUN --> GAP["에이전트가 자유 텍스트 edge-case gap 제안"]
   GAP --> Q["변경요청 큐"]
   Q --> REV{"human 검토"}
   REV -->|승인| MAT["ATTRIBUTE / EDGE_CASE 노드 materialise"]
   REV -->|반려| X["폐기"]
+  SYN --> HR["draft 트리 human 검토"]
   MAT --> SNAP["policy-set v1 스냅샷"]
+  HR --> SNAP
 ```
 
 bootstrap은 확정 라벨이 없으므로 cross-data 검색을 끈 채 일반 에이전트 루프를
-재사용한다. 제안은 **항상** human 승인 게이트를 거치며, 승인 시 해당 카테고리의
-scoring 루브릭 아래 실제 노드로 materialise된다.
+재사용하며, scoring 루브릭만 시드된다. bootstrap 영상 탐색 후
+`synthesize_category_policy`가 **관측된 segment로부터** 각 카테고리의 attribute
+definition + 결정 규칙 트리를 초안 작성한다 — 직접 draft 쓰기이며 policy-set v1
+스냅샷 전에 human 검토를 거친다. 자유 텍스트 edge-case 제안은 **항상** human
+게이트를 거치며, 승인 시 해당 카테고리의 scoring 루브릭 아래 실제 ATTRIBUTE /
+EDGE_CASE 노드로 materialise된다.
 
 ## 모델 역할 & provider
 
@@ -219,7 +249,7 @@ scoring 루브릭 아래 실제 노드로 materialise된다.
 |-----------|------|
 | `GET /api/videos?search=&page=&page_size=` | 페이징 갤러리(title/duration/thumbnail/n_segments) |
 | `GET /api/videos/{id}` · `/segments` · `/thumbnail` | 영상 상세·shot·JPEG 썸네일 |
-| `GET /api/labels?segment_id=` | full trace 포함 label |
+| `GET /api/labels?segment_id=` | evidence attribute + policy pin 포함 label |
 | `GET /api/policies?category=` · `GET /api/policy-sets` | 정책 트리 + set 버전 |
 | `GET/POST /api/policy-change-requests[/{id}/resolve]` | 검토 큐; 승인 → materialise |
 | `GET /api/db/tables[/{name}]` | 읽기전용 DB 브라우저(vector 컬럼 요약) |
