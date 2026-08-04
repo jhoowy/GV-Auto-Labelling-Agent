@@ -1,17 +1,16 @@
 """Bootstrap — establish the initial policy set.
 
-Reuses the normal mechanism (labelling agent + propose_policy_change queue),
-run intensively over bootstrap videos, then converged.
+Policy is authored **data-independently** by the policy LLM (`gpt-5.6-sol`): a
+category's attribute schema, base decision tree, and refined 0..5 rubric are
+designed from the PEGI seed rubric + a reference signal exemplar + the general-
+signal design principle alone — no collected video segments are consulted.
 
-    seed(PEGI -> rubric nodes = v0) -> label bootstrap videos -> cluster
-    proposals into edge-case candidates -> human review -> iterate until
-    cross-sample label variance converges -> policy-set v1
+    seed(PEGI -> rubric nodes = v0) -> author(rubric + exemplar + principle)
+    -> upsert refined rubric + ATTRIBUTE nodes + DECISION_RULE tree per category
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 
 from schemas import Category, Policy
 from schemas.enums import PolicyType
@@ -78,9 +77,9 @@ def seed_from_pegi(categories: list[Category] | None = None) -> None:
 
     Persists one SCORING Policy per category via upsert_policy (deterministic
     id `<category>.scoring`, so re-seeding edits in place rather than
-    duplicating). These nodes are the policy-set v0 baseline. No ATTRIBUTE
-    nodes are seeded — structured attributes (e.g. a profanity term list by
-    level) are drafted by the agent during bootstrap, not pre-seeded.
+    duplicating). These nodes are the policy-set v0 baseline and the seed
+    context the policy LLM refines. No ATTRIBUTE nodes are seeded — the
+    attribute schema is authored (data-independently) during bootstrap.
     """
     categories = categories or list(_PEGI_RUBRICS.keys())
     for cat in categories:
@@ -97,47 +96,6 @@ def seed_from_pegi(categories: list[Category] | None = None) -> None:
         log.info("seeded PEGI scoring rubric for %s", cat.value)
 
 
-def _cluster_proposals(reqs: list) -> list[list]:
-    """Group queued change requests into edge-case candidates.
-
-    Naive token-overlap (Jaccard) clustering — no model needed and robust when
-    the embedding server is down. Each cluster is one candidate EDGE_CASE rule
-    a human reviews before it enters the tree.
-    """
-    threshold = 0.4
-    clusters: list[list] = []
-    tokenised = [(r, set(r.proposed_change.lower().split())) for r in reqs]
-    for r, toks in tokenised:
-        placed = False
-        for cluster in clusters:
-            _, ctoks = cluster[0]
-            union = toks | ctoks
-            jac = len(toks & ctoks) / len(union) if union else 0.0
-            if jac >= threshold:
-                cluster.append((r, toks))
-                placed = True
-                break
-        if not placed:
-            clusters.append([(r, toks)])
-    return [[r for r, _ in cluster] for cluster in clusters]
-
-
-def _parse_json(text: str) -> dict:
-    """Lenient parse — the orchestrator may wrap JSON in prose/fences."""
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except Exception:  # noqa: BLE001
-        m = re.search(r"\{.*\}", text, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:  # noqa: BLE001
-                return {}
-    return {}
-
-
 def _scoring_text(category: str) -> str:
     """Human-readable scoring rubric for a category, from the live tree."""
     for node in policy_store.get_policy_tree(category):
@@ -146,301 +104,172 @@ def _scoring_text(category: str) -> str:
     return ""
 
 
-# Bound the digest so the orchestrator's thinking + JSON output fit its output
-# token cap; very long videos are sampled evenly rather than dropped from the end.
-_MAX_SHOTS = 24
-_SUMMARY_CAP = 240
-_TRANSCRIPT_CAP = 200
+# --- data-independent authoring -------------------------------------------
 
-
-def _observations(segments: list) -> str:
-    """One line per shot: idx, summary, ASR, and base (ingestion) attributes.
-
-    Evenly sub-samples to _MAX_SHOTS and truncates long fields to keep the prompt
-    small — a large prompt inflates the orchestrator's hidden reasoning and can
-    starve the JSON reply of output tokens."""
-    if len(segments) > _MAX_SHOTS:
-        step = len(segments) / _MAX_SHOTS
-        segments = [segments[int(i * step)] for i in range(_MAX_SHOTS)]
-    lines: list[str] = []
-    for seg in segments:
-        attrs = ", ".join(
-            f"{a.key}={a.value}" for a in getattr(seg, "base_attributes", [])
-        )
-        parts = [f"shot {seg.idx}"]
-        if seg.summary:
-            parts.append(f"summary: {seg.summary.strip()[:_SUMMARY_CAP]}")
-        if seg.transcript:
-            parts.append(f"transcript: {seg.transcript.strip()[:_TRANSCRIPT_CAP]}")
-        if attrs:
-            parts.append(f"base_attributes: {attrs[:200]}")
-        lines.append(" | ".join(parts))
-    return "\n".join(lines)
-
-
-_SYNTH_SYS = (
-    "You are a content-moderation policy engineer. From observed gameplay-video "
-    "shots and a PEGI-aligned 0..5 scoring rubric for ONE category, you design "
-    "the labelling policy: a small set of GENERAL, observable attributes "
-    "(signals) a labeller can tag in one pass, and an attribute-based decision "
-    "tree mapping their values to the 0..5 score. Ground every attribute and "
-    "rule in the rubric's bands. Respond with a single JSON object only, no "
-    "prose."
+# Condensed form of the reference project's sexual "signal" schema
+# (dt-labeling .../signal_tree/schemas/sexual.yaml). Included as an EXEMPLAR of
+# a well-formed GENERAL signal set — its SHAPE, not its content, is the lesson:
+# every attribute is a closed-enum observation; specificity lives in the enum
+# VALUES and a reused ordered priority/visibility axis, never in a verdict name.
+_EXEMPLAR = (
+    "Reference exemplar — a general 'signal' schema (from a sexual-content "
+    "project), shown ONLY to illustrate well-formed SHAPE, never to copy:\n"
+    "- Organised into a few sections (exposure / pose / text / context).\n"
+    "- Each section reuses ordered axes — `target` (female/male/ambiguous), "
+    "`priority` (low<medium<high), `visibility_level` (unclear<visible<"
+    "emphasize) — plus ONE closed `*_names` enum of the specific observable "
+    "things (exposure part_names: genital, nipple, cleavage, thigh, ...; pose "
+    "action_names: explicit_sex_act, kissing, seductive_gaze, ...).\n"
+    "- `ordinals` map each ordered enum value to a rank so rules compare by "
+    "DEGREE (priority low=1<medium=2<high=3; visibility unclear=1<visible=2<"
+    "emphasize=3).\n"
+    "Lesson: specificity lives in the ENUM VALUES + a reused ORDERED axis, not "
+    "in many narrow booleans."
 )
 
-# What separates a reusable signal from a baked-in verdict. Kept terse: flash
-# spends most of its output budget on hidden reasoning, and a long principle
-# inflates that reasoning until the JSON reply truncates.
-_ATTR_PRINCIPLE = (
-    "An ATTRIBUTE is a GENERAL, reusable signal — a closed enum (categorical, or "
-    "ordinal low..high) a labeller can point at in ONE frame — NEVER a verdict. "
-    "Put specificity in the ENUM VALUES of one general attribute, not in many "
-    "narrow booleans (NOT is_slot_machine; instead one `gambling_activity` with "
-    "values none/simulated_casino/loot_box/real_money_casino). Ban names "
-    "containing is_/core/frequent/functional/real/enough/primary — those are "
-    "judgments; express them as an ordinal value or a decision-tree rule."
+# What separates a reusable signal from a baked-in verdict.
+_DESIGN_PRINCIPLE = (
+    "An ATTRIBUTE is a GENERAL, reusable signal a labeller can point at in one "
+    "pass — a CLOSED enum (categorical, or ordinal ordered low..high), NEVER a "
+    "verdict. Put specificity in the ENUM VALUES of one general attribute, not "
+    "in many narrow booleans (NOT is_slot_machine; instead one "
+    "`gambling_activity` with values none/simulated_casino/loot_box/"
+    "real_money_casino). Ban attribute names containing is_/core/frequent/"
+    "functional/real/enough/primary — those are judgments; express them as an "
+    "ordinal value or a decision-tree rule."
 )
 
-# Attribute synthesis is split so every flash reply stays tiny (a rich all-in-one
-# reply truncates): stage 1 draws only names + value_type + scores; stage 2 fills
-# each attribute's enum/guidelines one attribute at a time.
-_ATTR_SKELETON_EXAMPLE = (
-    '{"attributes":['
-    '{"name":"gambling_activity","value_type":"categorical","scores_informed":'
-    '[1,2,3,4,5]},'
-    '{"name":"stake_severity","value_type":"ordinal","scores_informed":[2,4,5]},'
-    '{"name":"cashout_available","value_type":"boolean","scores_informed":[4,5]}'
-    ']}'
-)
-_DETAIL_EXAMPLE = (
-    '{"guidelines":"Which gambling-like activity, if any, is shown.","values":['
-    '{"value":"none","label":"None","description":"No gambling or chance-based '
-    'reward mechanic on screen.","examples":["a platformer level"]},'
-    '{"value":"simulated_casino","label":"Simulated casino","description":"A '
-    'casino game played with in-game currency.","examples":["poker with chips"]}'
-    ']}'
-)
-_RULE_EXAMPLE = (
-    '{"when":[{"attribute":"stake_severity","op":">=","value":"real"}],'
-    '"score":5,"note":"Real-money stakes reach the highest band."}'
+_AUTHOR_SYS = (
+    "You are a content-moderation policy engineer. Working DATA-INDEPENDENTLY "
+    "(you are shown no example videos), you design ONE category's labelling "
+    "policy from first principles: a small set of GENERAL, observable "
+    "attributes (signals), an attribute-based decision tree mapping their "
+    "values to a 0..5 age score, and a refined 0..5 rubric consistent with "
+    "both. Respond with a single JSON object only, no prose."
 )
 
 
-def _judge_json(orch, prompt: str) -> dict:
-    """One orchestrator JSON call with a single retry — flash occasionally emits
-    an empty/truncated reply, and a retry usually recovers a complete one."""
-    for _ in range(2):
-        parsed = _parse_json(orch.judge(_SYNTH_SYS, prompt))
-        if parsed:
-            return parsed
-    return {}
-
-
-def _salvage_objects(text: str) -> list[dict]:
-    """Recover every balanced `{...}` JSON object from a possibly-truncated reply.
-
-    flash spends most of its output budget on hidden reasoning, so a list reply
-    can be cut off mid-array; a stack scan still yields the complete element
-    objects (the unterminated outer object / last element are simply skipped)."""
-    objs: list[dict] = []
-    stack: list[int] = []
-    for i, ch in enumerate(text or ""):
-        if ch == "{":
-            stack.append(i)
-        elif ch == "}" and stack:
-            start = stack.pop()
-            try:
-                obj = json.loads(text[start:i + 1])
-            except Exception:  # noqa: BLE001
-                continue
-            if isinstance(obj, dict):
-                objs.append(obj)
-    return objs
-
-
-def _synth_attributes(orch, cat: str, rubric: str, obs: str) -> list[dict]:
-    """Define the GENERAL observable attributes a labeller needs.
-
-    Two tiny reply stages keep flash inside its output budget (one rich all-in-one
-    reply truncates under its hidden reasoning): (1) a skeleton naming 4-6 general
-    attributes with only value_type + scores; (2) one call per attribute that
-    fills its enum values (with per-value copy) and detection guidelines."""
-    prompt = (
+def _author_prompt(cat: str, rubric: str) -> str:
+    """The user prompt: base rubric (seed) + exemplar + principle + output spec.
+    No video data is included — authoring is by design data-independent."""
+    return (
         f"Category: {cat}\n\n"
-        f"Scoring rubric (0..5 age bands):\n{rubric}\n\n"
-        f"Observed shots:\n{obs}\n\n"
-        f"{_ATTR_PRINCIPLE}\n\n"
-        "Name 4-6 GENERAL observable attributes a labeller tags to decide the "
-        "0..5 score for THIS category. Give ONLY name, value_type "
-        "(boolean/categorical/ordinal) and scores_informed (the rubric bands the "
-        "attribute is evidence for) — the enum values come later. Match this "
-        "exact shape:\n" + _ATTR_SKELETON_EXAMPLE + "\n"
-        "Keep it short; output the JSON only."
+        f"Base scoring rubric (PEGI-aligned 0..5 age bands) to refine:\n"
+        f"{rubric}\n\n"
+        f"{_EXEMPLAR}\n\n"
+        f"{_DESIGN_PRINCIPLE}\n\n"
+        "Design this category's policy WITHOUT reference to any specific video. "
+        "Return a single JSON object with EXACTLY these keys:\n"
+        '{"rubric": "<refined 0..5 rubric text, one line per band 0..5>",\n'
+        ' "attributes": [ {"name":"...", "value_type":'
+        '"categorical|ordinal|boolean", "values":[ {"value":"...","label":'
+        '"...","description":"...","examples":["..."]} ], "guidelines":"...", '
+        '"scores_informed":[<ints>]} ],\n'
+        ' "decision_tree": {"default":0, "rules":[ {"when":[ {"attribute":'
+        '"...","op":"==|>=|<=|in|present","value":<val>} ], "score":<int>, '
+        '"note":"..."} ]} }\n\n'
+        "Requirements: 4-8 GENERAL attributes; each is a closed-enum "
+        "observation (specificity in the values, not the name); ordinal "
+        "attributes list values in ASCENDING order low..high so rules compare "
+        "with >=; boolean attributes omit `values`; the decision tree is "
+        "priority-ordered (highest score first) over ONLY these attributes and "
+        "their listed values, with band 0 as the default; the rubric's bands "
+        "stay consistent with the attributes and tree. Output JSON only."
     )
-    raw_text, parsed = "", {}
-    for _ in range(2):
-        raw_text = orch.judge(_SYNTH_SYS, prompt)
-        parsed = _parse_json(raw_text)
-        if parsed.get("attributes"):
-            break
-    raw = parsed.get("attributes") or []
-    if isinstance(raw, dict):  # some replies key attributes by name
-        raw = [{"name": k, **v} for k, v in raw.items() if isinstance(v, dict)]
-    attrs = [a for a in raw if isinstance(a, dict) and a.get("name")]
-    if not attrs:  # truncated reply -> salvage the complete attribute objects
-        attrs = [o for o in _salvage_objects(raw_text)
-                 if o.get("name") and o.get("value_type")]
-    for a in attrs:
-        _synth_detail(orch, cat, rubric, a)
-    return attrs
 
 
-def _synth_detail(orch, cat: str, rubric: str, attr: dict) -> None:
-    """Fill one attribute's `guidelines` and (for categorical/ordinal) its closed
-    enum `values` — a small per-attribute reply. Mutates `attr` in place; boolean
-    attributes keep `values=None`. Falls back to salvaged value objects when the
-    reply truncates, and to a bare guideline if none arrives."""
-    name = attr.get("name")
-    vtype = attr.get("value_type") or attr.get("type") or "categorical"
-    is_enum = vtype in ("categorical", "ordinal")
-    prompt = (
-        f"Category: {cat}. Attribute '{name}' (value_type {vtype}).\n"
-        f"Scoring rubric:\n{rubric}\n\n"
-        + ("Give its GENERAL detection `guidelines` (one line) and a CLOSED "
-           "`values` enum" + (" in ASCENDING order low..high" if vtype == "ordinal"
-                              else "") + ", each value with a one-line description "
-           "and 0-2 short frame examples. Keep specificity in these values, not in "
-           "the name. Output ONLY this JSON:\n" + _DETAIL_EXAMPLE
-           if is_enum else
-           "Give its GENERAL detection `guidelines` (one line). Output ONLY "
-           '{"guidelines":"..."}.')
-    )
-    raw_text = orch.judge(_SYNTH_SYS, prompt)
-    parsed = _parse_json(raw_text)
-    attr["guidelines"] = (parsed.get("guidelines")
-                          or attr.get("guidelines") or f"Observe {name}.")
-    if not is_enum:
-        attr["values"] = None
-        return
-    got = parsed.get("values")
-    if not got:  # truncated -> salvage the complete value objects
-        got = [o for o in _salvage_objects(raw_text) if "value" in o]
-    seen, values = set(), []
-    for v in got:
-        if not isinstance(v, dict):
-            continue
-        key = str(v.get("value") or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        values.append({
-            "value": key, "label": v.get("label") or key,
-            "description": v.get("description") or "",
-            "examples": list(v.get("examples") or []),
-        })
-    attr["values"] = values or None
+def _get_policy_llm():
+    from models import get_policy_llm
+    return get_policy_llm()
 
 
-def _rubric_bands(rubric: str) -> dict[int, str]:
-    """Parse the rubric text into {score -> band description}."""
-    bands: dict[int, str] = {}
-    for ln in rubric.splitlines():
-        m = re.match(r"\s*([0-5])\b[^:]*:\s*(.+)", ln)
-        if m:
-            bands[int(m.group(1))] = m.group(2).strip()
-    return bands
+def _base_rubric(cat: str) -> str:
+    """Authoring seed context: the PEGI seed rubric text for a category, falling
+    back to the live SCORING node if the category has no PEGI seed."""
+    try:
+        text = _PEGI_RUBRICS.get(Category(cat))
+    except ValueError:
+        text = None
+    return text or _scoring_text(cat)
 
 
-def _synth_rule(orch, cat: str, schema_json: str, score: int, desc: str) -> dict | None:
-    """One decision rule for one score band. Kept to a single tiny reply per call
-    because the orchestrator spends most of its token budget on hidden reasoning,
-    so a whole tree in one reply truncates; one rule always fits."""
-    prompt = (
-        f"Category: {cat}. Attributes:\n{schema_json}\n\n"
-        f"Score {score} means: {desc}\n\n"
-        f"Give ONE decision rule whose conditions over the attributes above "
-        f"select score {score}. Output ONLY this JSON object:\n" + _RULE_EXAMPLE + "\n"
-        "Each condition is {attribute,op,value}; op is ==, in, present, or (for "
-        "ORDINAL attributes only, comparing against a listed value) >= / <=. Use "
-        "only the attribute names/values above; short note; JSON only."
-    )
-    d = _judge_json(orch, prompt)
-    if "when" in d and "score" in d:
-        d["score"] = max(0, min(5, int(score)))  # trust the requested band
-        return d
-    return None
+def _as_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
 
 
-def _value_keys(values) -> list | None:
-    """The bare enum keys (`value` field) for the rule prompt — the model needs
-    the allowed values, not the full per-value copy. Accepts the rich dict form
-    or a plain list of strings."""
-    if not values:
-        return None
-    return [v.get("value") if isinstance(v, dict) else v for v in values]
+def _as_int_list(v) -> list[int]:
+    """Valid 0..5 score bands from a loose list; drops non-ints and negatives."""
+    out: list[int] = []
+    for x in v if isinstance(v, list) else []:
+        i = _as_int(x, -1)
+        if i >= 0:
+            out.append(i)
+    return out
 
 
-def _synth_decision_tree(orch, cat: str, rubric: str, attrs: list[dict]) -> dict:
-    """Priority-ordered decision tree over the defined attributes, built one rule
-    per rubric band (highest score first) so each orchestrator reply is small
-    enough to complete. Band 0 (no content) is the default."""
-    schema_json = json.dumps([
-        {"name": a.get("name"),
-         "value_type": a.get("value_type") or a.get("type"),
-         "values": _value_keys(a.get("values") or a.get("enum"))}
-        for a in attrs
-    ])
-    bands = _rubric_bands(rubric) or {s: "" for s in range(6)}
-    rules: list[dict] = []
-    for score in sorted((s for s in bands if s > 0), reverse=True):
-        rule = _synth_rule(orch, cat, schema_json, score, bands[score])
-        if rule:
-            rules.append(rule)
-    return {"default": 0, "rules": rules}
+def _as_dicts(v) -> list[dict]:
+    """Coerce an attributes/rules field into a list of dicts. Accepts a list, or
+    a name-keyed dict (some replies key items by name)."""
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, dict)]
+    if isinstance(v, dict):
+        return [{"name": k, **x} for k, x in v.items() if isinstance(x, dict)]
+    return []
 
 
-def synthesize_category_policy(
-    category: str, segments: list, *, orchestrator=None
-) -> dict:
-    """Draft a category's attribute schema + decision-rule tree from data.
+def author_category_policy(category, *, policy_llm=None) -> dict:
+    """Author a category's policy DATA-INDEPENDENTLY with the policy LLM.
 
-    Prompts the Gemini orchestrator with the explored shots' observations and the
-    category's scoring rubric in grounded steps: (a) one call defines the
-    attributes a labeller needs to decide the 0..5 score (name, value_type,
-    allowed values, detection guidelines, the score bands each informs), then (b)
-    one call per rubric band builds a priority-ordered decision tree over exactly
-    those attributes. Attribute defs are upserted as ATTRIBUTE nodes and the tree
-    as the category's DECISION_RULE node — direct DRAFT writes (the whole tree is
-    human-reviewed before a policy-set v1 snapshot). Keeping every reply small is
-    deliberate: the orchestrator spends most of its output-token budget on hidden
-    reasoning, so a large single reply truncates. Idempotent: re-running refines
-    in place (upsert bumps the node version)."""
+    No video data is consulted. The model (`gpt-5.6-sol`) is given (a) the
+    category's base PEGI rubric, (b) the reference sexual signal schema as a
+    condensed exemplar of well-formed general signals, and (c) the general-
+    signal design principle, and asked in ONE JSON call to design: a refined
+    0..5 rubric, 4-8 general closed-enum attributes, and a base decision tree
+    over exactly those attributes. Each piece is applied to the tree — the
+    refined rubric to the `{cat}.scoring` node, each attribute to a `{cat}.attr.
+    <name>` ATTRIBUTE node, and the tree to the `{cat}.rules` DECISION_RULE
+    node. Lenient about the reply shape. Idempotent: upsert bumps node
+    versions, so re-running re-authors in place. Returns a summary."""
     cat = getattr(category, "value", category)
-    orch = orchestrator or _get_agent_llm()
-    rubric = _scoring_text(cat)
-    obs = _observations(segments)
+    rubric = _base_rubric(cat)
+    llm = policy_llm or _get_policy_llm()
+    result = llm.complete_json(_AUTHOR_SYS, _author_prompt(cat, rubric))
 
-    attrs = _synth_attributes(orch, cat, rubric, obs)
+    # Refined rubric -> the SCORING node (fall back to the base rubric).
+    new_rubric = (result.get("rubric") or "").strip() or rubric
+    policy_store.upsert_policy(Policy(
+        policy_id=f"{cat}.scoring",
+        type=PolicyType.SCORING,
+        category=Category(cat),
+        text=new_rubric,
+    ))
+
+    # Attribute definitions -> one ATTRIBUTE node each.
     names: list[str] = []
-    for a in attrs:
-        name = a["name"]
+    for a in _as_dicts(result.get("attributes")):
+        name = str(a.get("name") or "").strip()
+        if not name:
+            continue
         policy_store.upsert_attribute_definition(
             cat, name,
             value_type=a.get("value_type") or a.get("type") or "categorical",
             guidelines=a.get("guidelines") or a.get("description") or "",
-            scores_informed=a.get("scores_informed") or [],
+            scores_informed=_as_int_list(a.get("scores_informed")),
             values=a.get("values") or a.get("enum"),
-            examples=a.get("examples"),
         )
         names.append(name)
 
-    tree = _synth_decision_tree(orch, cat, rubric, attrs)
-    rules = tree.get("rules") or []
-    default = int(tree.get("default", 0) or 0)
+    # Base decision tree -> the DECISION_RULE node.
+    tree = result.get("decision_tree") or result.get("tree") or {}
+    rules = [r for r in _as_dicts(tree.get("rules")) if r.get("when") is not None]
+    default = _as_int(tree.get("default"), 0)
     policy_store.upsert_decision_rule(cat, rules, default)
 
     log.info(
-        "bootstrap: synthesised %d attribute(s) + %d rule(s) for %s",
+        "bootstrap: authored %d attribute(s) + %d rule(s) for %s",
         len(names), len(rules), cat,
     )
     return {
@@ -451,66 +280,32 @@ def synthesize_category_policy(
     }
 
 
-def _get_agent_llm():
-    from models import get_agent_llm
-    return get_agent_llm()
+def run_bootstrap(video_ids: list[str] | None = None) -> dict:
+    """Author the initial policy set DATA-INDEPENDENTLY for every active category.
 
-
-def run_bootstrap(video_ids: list[str]) -> dict:
-    """Drive the labelling loop over bootstrap data to draft a structured policy
-    set. Returns a summary of the draft (seed rubrics + clustered candidates).
-
-    Bootstrap has no pre-labelled data, so cross-data precedent retrieval is
-    disabled (`label_video(..., bootstrap=True)`); the agent instead proposes
-    policy gaps that queue for human review.
+    No video data is consulted: each category's attribute schema, base decision
+    tree, and refined rubric are designed by the policy LLM (`gpt-5.6-sol`) from
+    the PEGI seed rubric + the reference signal exemplar + the general-signal
+    design principle alone. `video_ids` is accepted but ignored (kept for
+    call-site compatibility).
 
     Flow:
-      1. SEED: ensure PEGI v0 scoring rubrics exist.
-      2. RUN: label each bootstrap video with precedent retrieval OFF; JUDGE
-         proposes ATTRIBUTE / EDGE_CASE gaps, SIDE_FX queues them.
-      3. SYNTHESISE: per active category, draft an attribute schema + decision
-         tree from the explored shots (DRAFT nodes, not snapshotted).
-      4. CLUSTER: group queued proposals into candidate rules.
-      5. REVIEW (external, human-gated): approve/reject via resolve_change_request;
-         approved candidates become nodes and the tree is snapshotted as v1.
-         Nothing here auto-applies changes or auto-snapshots.
+      1. SEED: ensure PEGI v0 scoring rubrics exist (the authoring seed).
+      2. AUTHOR: per active category, `author_category_policy` designs and
+         upserts the refined rubric + ATTRIBUTE nodes + DECISION_RULE tree.
+    Idempotent: upsert bumps each node's version on re-run.
     """
-    from labelling import label_video
     from models import base_config
-    from tools import storage
 
     seed_from_pegi()
-
-    for vid in video_ids:
-        log.info("bootstrap: labelling %s (retrieval disabled)", vid)
-        label_video(vid, bootstrap=True)
-
-    # Synthesise a per-category attribute schema + decision tree from the shots
-    # explored above (draft nodes, human-reviewed before a policy-set v1 snapshot).
-    segments = [seg for vid in video_ids for seg in storage.get_segments(vid)]
     categories = base_config().get("policy", {}).get("categories", [])
-    synthesised = {}
+    authored: dict = {}
     for cat in categories:
         try:
-            synthesised[cat] = synthesize_category_policy(cat, segments)
+            authored[cat] = author_category_policy(cat)
         except Exception as e:  # noqa: BLE001 - one category must not abort the run
-            log.warning("bootstrap: synthesis failed for %s (%s)", cat, e)
-
-    proposals = policy_store.list_change_requests(status="queued")
-    clusters = _cluster_proposals(proposals)
-    log.info(
-        "bootstrap: %d queued proposals grouped into %d candidate rule(s); "
-        "awaiting human review before policy-set v1",
-        len(proposals), len(clusters),
-    )
+            log.warning("bootstrap: authoring failed for %s (%s)", cat, e)
     return {
-        "videos": len(video_ids),
         "seeded_categories": [c.value for c in _PEGI_RUBRICS],
-        "synthesised": synthesised,
-        "n_proposals": len(proposals),
-        "n_candidates": len(clusters),
-        "candidates": [
-            {"size": len(c), "example": c[0].proposed_change if c else ""}
-            for c in clusters
-        ],
+        "authored": authored,
     }

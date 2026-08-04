@@ -309,12 +309,51 @@ class GeminiOrchestrator:
         return self._generate(None, [types.Part.from_text(text=text)], json_out=False)
 
 
+class OpenAIPolicyAuthor:
+    """Text-only JSON author for data-independent policy design (config
+    `policy_llm`). Uses the OpenAI chat/completions API with a forced JSON
+    response; the reasoning model gets no custom temperature. The API key is
+    read at call time from OPENAI_API_KEY so `import models` needs no key."""
+
+    def __init__(self, profile_name: str | None = None):
+        spec = role_spec("policy_llm", profile_name)
+        self.model = spec["model"]
+
+    def complete_json(self, system: str, user: str) -> dict:
+        import os
+
+        from openai import OpenAI  # local import: no key needed to import models
+
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        r = client.chat.completions.create(
+            model=self.model,
+            response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+        )
+        content = r.choices[0].message.content or "{}"
+        try:
+            obj = json.loads(content)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}", content, re.S)
+            obj = json.loads(m.group(0)) if m else {}
+        return obj if isinstance(obj, dict) else {}
+
+
 def get_agent_llm(profile_name: str | None = None) -> GeminiOrchestrator:
     """Multimodal orchestrator for the labelling agent (config `agent_llm`)."""
     prov = _provider("agent_llm", profile_name)
     if prov == "google-genai":
         return GeminiOrchestrator(profile_name)
     raise _unimplemented(prov, "agent_llm")
+
+
+def get_policy_llm(profile_name: str | None = None) -> OpenAIPolicyAuthor:
+    """Text JSON author for data-independent policy design (config `policy_llm`)."""
+    prov = _provider("policy_llm", profile_name)
+    if prov == "openai":
+        return OpenAIPolicyAuthor(profile_name)
+    raise _unimplemented(prov, "policy_llm")
 
 
 def get_text_embedder(profile_name: str | None = None) -> Embedder:
