@@ -6,10 +6,12 @@ with a restricted tool set. The window slides until all segments are labelled.
              (loop to next window until done)
 
   RETRIEVE  policies + precedents
-  JUDGE     multimodal orchestrator (frames + summary + ASR) scores every
-            category; derives policy-layer attributes and checks precedent
-            consistency inline (divergences recorded as issues in the trace)
-  SIDE_FX   revise_ingestion (auto+log) / propose_policy_change (queue)
+  JUDGE     per category: extract the defined attributes (frames + summary +
+            ASR) and apply the decision-rule tree to a score; categories with no
+            attribute defs/tree (and all of bootstrap) fall back to holistic
+            multimodal scoring
+  SIDE_FX   propose_policy_change (queue) — incl. rule-change requests when the
+            tree doesn't fit / define_structured_attribute (bootstrap)
   COMMIT    emit labels + update the carry-over rolling summary
 
 See docs/AGENT_WORKFLOW.md for the full definition.
@@ -63,6 +65,20 @@ _BOOTSTRAP_SUFFIX = (
     '"levels":{{"<score-level>":[terms]}},"description":str}}] (empty list if '
     "none). Levels are PEGI bands 0..5; a term at level L is evidence toward "
     "score L for that category."
+)
+
+_EXTRACT_SYS = (
+    "You are a content-moderation attribute extractor for gameplay videos. For "
+    "the TARGET SHOT and category '{cat}', extract a value for EACH listed "
+    "attribute from the up-to-5 sampled frames plus the shot summary and ASR "
+    "text. Obey each attribute's value_type and allowed values exactly (booleans "
+    "as true/false). Give a short evidence string per attribute. If the sampled "
+    "frames are insufficient, set need_more_frames=true. If the listed attributes "
+    "and rules plainly cannot describe this shot's relevant {cat} content, set "
+    "tree_fits=false and explain the gap in gap_note. Return ONLY JSON of the "
+    'form {{"attributes":{{"<name>":{{"value":<value>,"evidence":str}}}},'
+    '"confidence":float,"need_more_frames":bool,"tree_fits":bool,'
+    '"gap_note":str}}.'
 )
 
 
@@ -130,6 +146,82 @@ def _normalise_pins(cited: list[str], version_by_id: dict[str, int]) -> list[str
     return pins
 
 
+def _as_num(x):
+    """Coerce to float for ordered comparison; bools/non-numerics -> None."""
+    if isinstance(x, bool):
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(x):
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, str):
+        return x.strip().lower() in ("true", "yes", "1")
+    if isinstance(x, (int, float)):
+        return bool(x)
+    return None
+
+
+def _val_eq(a, b) -> bool:
+    """Type-robust equality: bool vs "true"/1, numeric vs "3", else case-fold str."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        ba, bb = _as_bool(a), _as_bool(b)
+        return ba is not None and ba == bb
+    na, nb = _as_num(a), _as_num(b)
+    if na is not None and nb is not None:
+        return na == nb
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _match_cond(cond: dict, values: dict) -> bool:
+    """One decision-tree condition against the extracted attribute values."""
+    attr = cond.get("attribute")
+    op = cond.get("op")
+    target = cond.get("value")
+    present = attr in values and values.get(attr) is not None
+    if op == "present":
+        return present
+    if not present:
+        return False
+    v = values.get(attr)
+    if op == "==":
+        return _val_eq(v, target)
+    if op in (">=", "<="):
+        a, b = _as_num(v), _as_num(target)
+        if a is None or b is None:
+            return False
+        return a >= b if op == ">=" else a <= b
+    if op == "in":
+        opts = target if isinstance(target, (list, tuple, set)) else [target]
+        return any(_val_eq(v, o) for o in opts)
+    return False
+
+
+def _apply_decision_tree(rules: list, default: int,
+                         values: dict) -> tuple[int, dict | None]:
+    """Evaluate a priority-ordered decision tree against extracted attribute
+    values. First rule whose every `when` condition matches wins; otherwise the
+    default. Returns (clamped score, matched rule | None)."""
+    for rule in rules or []:
+        conds = rule.get("when") or []
+        if all(_match_cond(c, values) for c in conds):
+            return _clamp(rule.get("score", default)), rule
+    return _clamp(default), None
+
+
+def _attr_value(v):
+    """Coerce an extracted value into the Attribute.value union (str|float|bool)."""
+    if isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, (int, float)):
+        return float(v)
+    return "unknown" if v is None else str(v)
+
+
 def _segment_block(seg, asr: str, policy_attrs: list[Attribute]) -> str:
     base = ", ".join(f"{a.key}={a.value}" for a in seg.base_attributes) or "none"
     derived = ", ".join(f"{a.key}={a.value}" for a in policy_attrs) or "none"
@@ -158,6 +250,17 @@ def _judge_prompt(state, seg, asr, policy_attrs, policy_text, precedents) -> str
         f"RELEVANT POLICY NODES:\n{policy_text}\n\n"
         f"PRECEDENT LABELS (similar shots):\n{prec_text}\n\n"
         "Judge every category for the TARGET SHOT."
+    )
+
+
+def _extract_prompt(state, seg, asr, cat, attr_lines) -> str:
+    return (
+        f"GLOBAL VIDEO OVERVIEW:\n{state.get('global_overview', '') or 'n/a'}\n\n"
+        f"CARRY-OVER (confirmed so far):\n{state.get('carry_over', '') or 'none'}\n\n"
+        f"CATEGORY: {cat}\n\n"
+        f"TARGET SHOT (frames attached below):\n{_segment_block(seg, asr, [])}\n\n"
+        f"ATTRIBUTES TO EXTRACT:\n{attr_lines}\n\n"
+        "Extract every listed attribute for the TARGET SHOT."
     )
 
 
@@ -216,12 +319,14 @@ def _retrieve(state: LabellingState) -> dict:
 
 
 def _judge(state: LabellingState) -> dict:
-    """Multimodal judging (absorbs DERIVE + CHECK).
+    """Attribute-driven judging.
 
-    For each confirm shot: derive policy-layer attributes, sample ≤5 frames, ask
-    the orchestrator to score every category (once, with a single frame-expansion
-    retry if it asks), then record precedent divergences as issues on the trace.
-    The orchestrator is resolved here, so build_graph() needs no server."""
+    Per confirm shot, per category: if the category has ATTRIBUTE definitions
+    plus a DECISION_RULE tree, extract each defined attribute's value once from
+    the ≤5 frames + summary + ASR, then apply the tree deterministically to a
+    score. Categories with no defs/rules (or any category in bootstrap, which is
+    still discovering the policy) fall back to holistic multimodal scoring.
+    The orchestrator/DB are resolved here, so build_graph() needs no server."""
     from models import get_agent_llm
     from tools import policy_store, retrieval
 
@@ -232,157 +337,255 @@ def _judge(state: LabellingState) -> dict:
     asr = state.get("asr_by_segment", {})
     policies = state.get("retrieved_policies", [])
     precedents = state.get("precedents", [])
+
+    # Per-category attribute-def nodes + decision-rule tree from the policy tree.
+    cat_defs: dict[str, list] = {}
+    cat_rule: dict[str, object] = {}
+    for cat in cats:
+        defs, rule = [], None
+        for node in policy_store.get_policy_tree(cat):
+            sd = node.structured_data or {}
+            if sd.get("kind") == "attribute_def":
+                defs.append(node)
+            elif sd.get("kind") == "decision_tree" and node.policy_id == f"{cat}.rules":
+                rule = node
+        cat_defs[cat], cat_rule[cat] = defs, rule
+
+    # Attribute-driven needs BOTH defs and a tree; else (and always in bootstrap)
+    # the category keeps holistic scoring so JUDGE still works pre-synthesis.
+    attr_cats = ([] if bootstrap
+                 else [c for c in cats if cat_defs[c] and cat_rule[c]])
+    fallback_cats = [c for c in cats if c not in attr_cats]
+
+    drafts: list[Label] = []
+    proposals: list[dict] = []
+    for seg in confirm:
+        text = asr.get(seg.segment_id, "")
+        frames = agent_tools.sample_frames(seg, _FRAMES_PER_SHOT)
+
+        for cat in attr_cats:
+            lbl, prop = _judge_attribute_driven(
+                orch, state, seg, text, frames, cat,
+                cat_defs[cat], cat_rule[cat])
+            drafts.append(lbl)
+            if prop:
+                proposals.append(prop)
+
+        if fallback_cats:
+            fb_drafts, fb_props = _judge_holistic(
+                orch, state, seg, text, frames, fallback_cats, policies,
+                precedents, bootstrap, policy_store, retrieval)
+            drafts.extend(fb_drafts)
+            proposals.extend(fb_props)
+
+    return {"draft_labels": drafts, "proposals": proposals}
+
+
+def _judge_attribute_driven(orch, state, seg, asr, frames, cat, defs, rule_node):
+    """Extract each defined attribute for the shot, then apply the category's
+    decision tree deterministically. Returns (Label, rule-change proposal|None)."""
+    def_by_name: dict[str, object] = {}
+    lines: list[str] = []
+    for d in defs:
+        name = d.policy_id.split(".attr.", 1)[1] if ".attr." in d.policy_id else d.policy_id
+        def_by_name[name] = d
+        sd = d.structured_data or {}
+        line = f"- {name} ({sd.get('value_type', '')})"
+        if sd.get("values"):
+            line += f" one of {sd['values']}"
+        lines.append(line + f": {sd.get('guidelines', d.text)}")
+
+    system = _EXTRACT_SYS.format(cat=cat)
+    prompt = _extract_prompt(state, seg, asr, cat, "\n".join(lines))
+    parsed = _parse_json(orch.judge(system, prompt, frames))
+    if parsed.get("need_more_frames") and frames:
+        more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
+        parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
+
+    extracted = {n: o for n, o in (parsed.get("attributes") or {}).items()
+                 if isinstance(o, dict)}
+    values = {n: o.get("value") for n, o in extracted.items()}
+
+    tree = rule_node.structured_data or {}
+    rules = tree.get("rules") or []
+    score, matched = _apply_decision_tree(rules, tree.get("default", 0), values)
+
+    # evidence_attributes: one policy-layer Attribute per extracted defined attr.
+    evidence: list[Attribute] = []
+    for name, o in extracted.items():
+        d = def_by_name.get(name)
+        if not d:
+            continue
+        evidence.append(Attribute(
+            key=name, value=_attr_value(o.get("value")),
+            layer=AttributeLayer.POLICY, source="judge/extract",
+            evidence=str(o.get("evidence") or "") or None,
+            policy_version=d.version,
+        ))
+
+    # cited pins: every attribute-def node + the rule node, canonicalised.
+    ver_map = {d.policy_id: d.version for d in defs}
+    ver_map[rule_node.policy_id] = rule_node.version
+    cited = _normalise_pins([d.policy_id for d in defs] + [rule_node.policy_id], ver_map)
+
+    if matched is not None:
+        idx = rules.index(matched)
+        note = matched.get("note", "")
+        rationale = f"[{cat}] rule #{idx} matched (score {score}): {note}".rstrip()
+        decision = {"category": cat, "rule_index": idx, "rule_note": note,
+                    "score": score}
+    else:
+        rationale = (f"[{cat}] no decision rule matched the extracted attributes; "
+                     f"applied default score {score}.")
+        decision = {"category": cat, "rule_index": None, "score": score}
+
+    lbl = Label(
+        label_id="", segment_id=seg.segment_id, category=cat, score=score,
+        rationale=rationale, cited_policy_ids=cited, evidence_attributes=evidence,
+        confidence=parsed.get("confidence"), tool_trace=[{"decision": decision}],
+    )
+
+    # Request a rule modification (queued, not applied) when the tree clearly
+    # doesn't fit: orchestrator flags tree_fits=false, or nothing matched + gap.
+    proposal = None
+    tree_fits = parsed.get("tree_fits", True)
+    gap_note = (parsed.get("gap_note") or "").strip()
+    if tree_fits is False or (matched is None and gap_note):
+        proposal = {"rule_change": {
+            "category": cat, "target_policy_id": rule_node.policy_id,
+            "segment_id": seg.segment_id,
+            "change": (f"Extend/adjust the {cat} decision tree: "
+                       f"{gap_note or 'shot content matched no existing rule.'}"),
+            "rationale": (f"Shot {seg.segment_id} extracted {values} but the "
+                          "current rule tree did not fit."),
+        }}
+    return lbl, proposal
+
+
+def _judge_holistic(orch, state, seg, asr, frames, cats, policies, precedents,
+                    bootstrap, policy_store, retrieval):
+    """Holistic multimodal scoring for categories without an attribute tree (and
+    for every category in bootstrap). Preserves the legacy DERIVE (structured
+    term levels), one JSON call scoring the given cats, bootstrap gap/structured
+    proposals, and weak precedent-divergence checking. Returns (labels, props)."""
     system = _JUDGE_SYS.format(cats=", ".join(cats))
     if bootstrap:
         system += _BOOTSTRAP_SUFFIX
 
     policy_text = "\n".join(
         f"- ({p.policy_id},v{p.version}) [{p.type.value}/{p.category.value}] {p.text}"
-        for p in policies
+        for p in policies if p.category.value in cats
     ) or "none"
-
-    # canonical (policy_id -> version) pinning source: what was actually retrieved
     version_by_id = {p.policy_id: p.version for p in policies}
 
-    # DB-managed structured attributes (term lists by score level) per active
-    # category. Not mandatory: if the tree has none, DERIVE emits nothing.
-    term_nodes: list[tuple[str, str, dict, int]] = []
+    # DERIVE (legacy): graded policy-layer attributes from structured term lists.
+    pattrs: list[Attribute] = []
     for cat in cats:
         for node in policy_store.get_policy_tree(cat):
             sd = node.structured_data or {}
-            if sd.get("kind") == "term_levels":
-                prefix = f"{cat}.attr."
-                name = (node.policy_id[len(prefix):]
-                        if node.policy_id.startswith(prefix) else node.policy_id)
-                term_nodes.append((cat, name, sd, node.version))
-
-    drafts: list[Label] = []
-    proposals: list[dict] = []
-    extra_trace: list[dict] = []
-    for seg in confirm:
-        text = asr.get(seg.segment_id, "")
-
-        # DERIVE (absorbed): graded policy-layer attributes from structured term
-        # lists. Per matching node add ONE attribute at the max matched level.
-        pattrs: list[Attribute] = []
-        for cat, name, sd, ver in term_nodes:
-            matched = retrieval.match_term_levels(sd, text)
+            if sd.get("kind") != "term_levels":
+                continue
+            matched = retrieval.match_term_levels(sd, asr)
             if not matched:
                 continue
             max_level = max(int(lvl) for lvl in matched)
+            prefix = f"{cat}.attr."
+            name = (node.policy_id[len(prefix):]
+                    if node.policy_id.startswith(prefix) else node.policy_id)
             pattrs.append(Attribute(
                 key=f"{cat}.{name}_level", value=int(max_level),
                 layer=AttributeLayer.POLICY, source="judge/derive",
                 evidence=", ".join(matched.get(str(max_level), [])),
-                policy_version=ver,
-            ))
+                policy_version=node.version))
 
-        frames = agent_tools.sample_frames(seg, _FRAMES_PER_SHOT)
-        prompt = _judge_prompt(state, seg, text, pattrs, policy_text, precedents)
-        parsed = _parse_json(orch.judge(system, prompt, frames))
+    prompt = _judge_prompt(state, seg, asr, pattrs, policy_text, precedents)
+    parsed = _parse_json(orch.judge(system, prompt, frames))
+    if parsed.get("need_more_frames") and frames:
+        more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
+        parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
 
-        # active perception: one frame-expansion retry if the model asks
-        if parsed.get("need_more_frames") and frames:
-            more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
-            parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
-            extra_trace.append({"stage": "JUDGE", "segment_id": seg.segment_id,
-                                "action": "expand_frames", "n_frames": len(more)})
+    proposals: list[dict] = []
+    if bootstrap:
+        for g in parsed.get("policy_gaps") or []:
+            proposals.append({
+                "segment_id": seg.segment_id, "category": g.get("category"),
+                "kind": g.get("kind", "edge_case"),
+                "suggestion": g.get("suggestion", "") or "",
+                "rationale": g.get("rationale", "") or ""})
+        for sa in parsed.get("structured_attributes") or []:
+            proposals.append({"structured_attribute": {
+                "segment_id": seg.segment_id, "category": sa.get("category"),
+                "name": sa.get("name"), "levels": sa.get("levels") or {},
+                "description": sa.get("description")}})
 
-        if bootstrap:
-            for g in parsed.get("policy_gaps") or []:
-                proposals.append({
-                    "segment_id": seg.segment_id, "category": g.get("category"),
-                    "kind": g.get("kind", "edge_case"),
-                    "suggestion": g.get("suggestion", "") or "",
-                    "rationale": g.get("rationale", "") or "",
-                })
-            # Structured term-level attributes: drafted directly in SIDE_FX (not
-            # queued), so they are tagged separately from free-text gaps.
-            for sa in parsed.get("structured_attributes") or []:
-                proposals.append({"structured_attribute": {
-                    "segment_id": seg.segment_id,
-                    "category": sa.get("category"),
-                    "name": sa.get("name"),
-                    "levels": sa.get("levels") or {},
-                    "description": sa.get("description"),
-                }})
-
-        seg_prec = [pr for pr in precedents if pr["segment_id"] == seg.segment_id]
-        for j in parsed.get("judgements", []):
-            cat = j.get("category")
-            if cat not in cats:
-                continue
-            lbl = Label(
-                label_id="", segment_id=seg.segment_id, category=cat,
-                score=_clamp(j.get("score")), rationale=j.get("rationale", "") or "",
-                cited_policy_ids=_normalise_pins(
-                    list(j.get("cited_policy_ids") or []), version_by_id),
-                evidence_attributes=pattrs, confidence=j.get("confidence"),
-            )
-            # CHECK (absorbed): precedent divergence -> issue on the trace
-            prec_scores = [
-                pl["score"] for pr in seg_prec for pl in pr["labels"]
-                if pl.get("category") == cat and pl.get("score") is not None
-            ]
-            if prec_scores and all(abs(lbl.score - ps) >= 2 for ps in prec_scores):
-                lbl.tool_trace.append({
-                    "issue": "precedent_divergence", "segment_id": seg.segment_id,
-                    "category": cat, "score": lbl.score,
-                    "precedent_scores": prec_scores,
-                    "note": "diverges from precedent; retained for human triage",
-                })
-            drafts.append(lbl)
-
-    trace = state.get("tool_trace", []) + extra_trace + [{
-        "stage": "JUDGE", "n_labels": len(drafts), "n_proposals": len(proposals),
-    }]
-    return {"draft_labels": drafts, "proposals": proposals, "tool_trace": trace}
+    seg_prec = [pr for pr in precedents if pr["segment_id"] == seg.segment_id]
+    drafts: list[Label] = []
+    for j in parsed.get("judgements", []):
+        cat = j.get("category")
+        if cat not in cats:
+            continue
+        score = _clamp(j.get("score"))
+        rationale = j.get("rationale", "") or ""
+        decision = {"category": cat, "mode": "holistic", "score": score}
+        prec_scores = [pl["score"] for pr in seg_prec for pl in pr["labels"]
+                       if pl.get("category") == cat and pl.get("score") is not None]
+        if prec_scores and all(abs(score - ps) >= 2 for ps in prec_scores):
+            decision["precedent_divergence"] = prec_scores
+            rationale += " (diverges from precedent; retained for human triage)"
+        drafts.append(Label(
+            label_id="", segment_id=seg.segment_id, category=cat, score=score,
+            rationale=rationale, evidence_attributes=pattrs,
+            cited_policy_ids=_normalise_pins(
+                list(j.get("cited_policy_ids") or []), version_by_id),
+            confidence=j.get("confidence"), tool_trace=[{"decision": decision}]))
+    return drafts, proposals
 
 
 def _side_fx(state: LabellingState) -> dict:
-    """Side-effect slot: revise_ingestion (auto+log) / propose_policy_change
-    (queued for human). In bootstrap mode the policy gaps found in JUDGE are
-    enqueued as change requests here; the baseline labelling run fires nothing."""
-    actions: list[dict] = []
-    if state.get("bootstrap"):
-        for p in state.get("proposals", []) or []:
-            # Structured attribute: direct upsert (bootstrap drafting), not queued.
-            sa = p.get("structured_attribute")
-            if sa:
-                if sa.get("category") and sa.get("name") and sa.get("levels"):
-                    node = agent_tools.define_structured_attribute(
-                        category=sa["category"], name=sa["name"],
-                        levels=sa["levels"], description=sa.get("description"),
-                    )
-                    actions.append({"define_structured_attribute":
-                                    f"{node.policy_id} levels={sorted(sa['levels'])}"})
-                continue
-            # Free-text gap: still human-gated via the change-request queue.
-            cat = p.get("category")
-            kind = p.get("kind", "edge_case")
-            suggestion = p.get("suggestion", "")
+    """Side-effect slot: propose_policy_change (queued for human) /
+    define_structured_attribute (bootstrap direct upsert). Proposals are
+    dispatched by shape: attribute-driven JUDGE enqueues rule-change requests,
+    bootstrap enqueues free-text gaps and drafts structured attributes."""
+    for p in state.get("proposals", []) or []:
+        # Rule-change request from the attribute-driven tree (never auto-applied).
+        rc = p.get("rule_change")
+        if rc:
             agent_tools.propose_policy_change(
-                change=suggestion, rationale=p.get("rationale", ""),
-                affected=[p["segment_id"]] if p.get("segment_id") else [],
-                category=cat, node_type=kind,
-            )
-            actions.append({"propose_policy_change": f"[{kind}/{cat}] {suggestion}"[:80]})
-    trace = state.get("tool_trace", []) + [{"stage": "SIDE_FX", "actions": actions}]
-    return {"tool_trace": trace}
+                change=rc["change"], rationale=rc["rationale"],
+                affected=[rc["segment_id"]] if rc.get("segment_id") else [],
+                category=rc.get("category"), node_type="decision_rule",
+                target_policy_id=rc.get("target_policy_id"))
+            continue
+        # Structured attribute: direct upsert (bootstrap drafting), not queued.
+        sa = p.get("structured_attribute")
+        if sa:
+            if sa.get("category") and sa.get("name") and sa.get("levels"):
+                agent_tools.define_structured_attribute(
+                    category=sa["category"], name=sa["name"],
+                    levels=sa["levels"], description=sa.get("description"))
+            continue
+        # Free-text bootstrap gap: human-gated via the change-request queue.
+        agent_tools.propose_policy_change(
+            change=p.get("suggestion", ""), rationale=p.get("rationale", ""),
+            affected=[p["segment_id"]] if p.get("segment_id") else [],
+            category=p.get("category"), node_type=p.get("kind", "edge_case"))
+    return {}
 
 
 def _commit(state: LabellingState) -> dict:
-    """Persist labels, refresh the rolling carry-over, advance the cursor."""
+    """Persist labels, refresh the rolling carry-over, advance the cursor.
+
+    A label's audit trail is its evidence_attributes + cited_policy_ids + the
+    compact decision entry set in JUDGE; the per-stage tool_trace dump is no
+    longer merged in here."""
     drafts = state.get("draft_labels", [])
     window = state.get("window", [])
-    base_trace = state.get("tool_trace", [])
     used_ids = [s.segment_id for s in window]
 
     committed: list[Label] = []
     for lbl in drafts:
         lbl.label_id = lbl.label_id or str(uuid4())
         lbl.used_segment_ids = [i for i in used_ids if i != lbl.segment_id]
-        lbl.tool_trace = base_trace + lbl.tool_trace
         agent_tools.emit_label(lbl)
         committed.append(lbl)
 
@@ -390,10 +593,7 @@ def _commit(state: LabellingState) -> dict:
     carry = (state.get("carry_over", "") + " | " + ", ".join(bits)).strip(" |")
 
     cursor = state["cursor"] + state.get("window_stride", 3)
-    trace = base_trace + [{"stage": "COMMIT",
-                           "committed": [lbl.label_id for lbl in committed]}]
-    return {"cursor": cursor, "carry_over": carry, "draft_labels": [],
-            "tool_trace": trace}
+    return {"cursor": cursor, "carry_over": carry, "draft_labels": []}
 
 
 def _route(state: LabellingState) -> str:
