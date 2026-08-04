@@ -8,6 +8,7 @@
 # Ingestion serves these models via vLLM with FlashAttention.
 
 asr:                # audio -> transcript + word timestamps (isolated qwen-asr server)
+  provider: vllm
   model_path: /path/to/Qwen3-ASR-1.7B
   base_url: http://localhost:8810
 
@@ -15,16 +16,25 @@ aligner:            # used by the asr server (forced alignment weights)
   model_path: /path/to/Qwen3-ForcedAligner-0.6B
 
 mllm:               # clip (vision + audio) -> summary
+  provider: vllm
   model_path: /path/to/Qwen3-Omni-30B-A3B-Instruct
   base_url: http://localhost:8801/v1
   served_model_name: omni
 
+agent_llm:          # labelling orchestrator (multimodal; google-genai API)
+  provider: google-genai       # needs GENAI_API_KEY in the environment
+  model: gemini-3.5-flash
+  temperature: 0.0
+  max_tokens: 2048
+
 text_embedding:     # ASR + summary -> segment & global text embedding
+  provider: vllm      # -> QwenTextEmbedder; emits Vector(2560), matches db/models.py
   model_path: /path/to/Qwen3-Embedding-4B
   base_url: http://localhost:8803/v1
   served_model_name: text-embed
 
 image_embedding:    # clip -> visual (video) embedding
+  provider: vllm      # -> QwenVisualEmbedder; emits Vector(2048), matches db/models.py
   model_path: /path/to/Qwen3-VL-Embedding-2B
   base_url: http://localhost:8804/v1
   served_model_name: visual-embed

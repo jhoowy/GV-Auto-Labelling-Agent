@@ -1,6 +1,12 @@
-# Default profile: proprietary providers. Each model role can independently
-# switch provider; a local-vLLM profile would mirror this file pointing at
-# OpenAI-compatible vLLM endpoints.
+# TEMPLATE — proprietary-provider profile. NONE of these providers are wired in
+# this PoC: every factory in packages/models/models/providers.py raises
+# NotImplementedError for them. Only MODEL_PROFILE=local is runnable; use this
+# file as the starting point when adding a proprietary/hosted provider.
+#
+# Each model role independently declares a `provider`. Switching the text or
+# image embedder also means changing the db/models.py embedding dims + a new
+# Alembic migration: the live DB columns are Vector(2560) text / Vector(2048)
+# image (local Qwen), so the `dim`s below would not fit as-is.
 
 # Vision + audio MLLM: produces summary + base_attributes. Recognises audio
 # directly (covers Bad Language); OCR is out of PoC scope.
@@ -17,12 +23,12 @@ asr:
 text_embedding:
   provider: openai
   model: text-embedding-3-large
-  dim: 3072
+  dim: 3072            # != DB Vector(2560): needs a migration to actually use
 
 image_embedding:
-  provider: local
+  provider: huggingface
   model: clip-vit-large
-  dim: 768
+  dim: 768             # != DB Vector(2048): needs a migration to actually use
 
 # Agent reasoning LLM for the orchestrator.
 agent_llm:

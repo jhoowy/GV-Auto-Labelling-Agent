@@ -9,31 +9,116 @@ record into tool_trace.
 """
 from __future__ import annotations
 
-from schemas import Label, PolicyChangeRequest
-from tools import policy_store, retrieval, storage
+import asyncio
+
+from schemas import Label, PolicyChangeRequest, Segment
+
+# NOTE: the service layer (`tools`) pulls in `db`, so it is imported lazily inside
+# each wrapper — a plain import of this module (and build_graph) needs no DB.
 
 
 def search_policies(query: str, category: str | None = None):
+    from tools import retrieval
     return retrieval.search_policies(query, category)
 
 
-def find_similar_segments(segment_id: str):
-    """Similar segments + their confirmed labels (precedent lookup)."""
-    raise NotImplementedError
+def find_similar_segments(segment: Segment, top_k: int = 5):
+    """Similar segments + their confirmed labels (precedent lookup).
+
+    Returns list[(Segment, list[Label])] — the primary consistency signal.
+    """
+    from tools import retrieval
+    return retrieval.find_similar_segments(segment, top_k)
 
 
 def lookup_structured(ref: str, text: str) -> bool:
+    from tools import retrieval
     return retrieval.lookup_structured(ref, text)
 
 
-def expand_window(direction: str, n: int):
-    """Pull more neighbouring shots when context is insufficient."""
-    raise NotImplementedError
+def expand_window(
+    all_segments: list[Segment], lo: int, hi: int, direction: str, n: int
+) -> list[Segment]:
+    """Pull more neighbouring shots when context is insufficient.
+
+    `all_segments` is the full ordered list; `[lo, hi)` is the current window.
+    Returns the neighbour shots just outside that window on the requested side
+    ("left" | "right" | "both"), clamped to the video bounds.
+    """
+    left = all_segments[max(0, lo - n):lo] if direction in ("left", "both") else []
+    right = all_segments[hi:hi + n] if direction in ("right", "both") else []
+    return left + right
 
 
-def get_frames(segment_id: str, t_start: float, t_end: float):
-    """Inspect a specific frame range via the vision MLLM."""
-    raise NotImplementedError
+def get_frames(segment: Segment, t_start: float, t_end: float,
+               prompt: str | None = None) -> str:
+    """Inspect a specific frame range via the vision MLLM.
+
+    Resolves the segment's clip blob to a local path and asks the omni MLLM to
+    describe what happens in [t_start, t_end]. Model/blob access happens here,
+    not at import time.
+    """
+    if not segment.clip_blob:
+        raise ValueError(f"segment {segment.segment_id} has no clip_blob to inspect")
+    from models import get_mllm
+    from tools import blob
+
+    clip_path = blob.get_blob_store().url(segment.clip_blob)
+    ask = prompt or (
+        f"Describe in detail what happens between {t_start:.2f}s and {t_end:.2f}s "
+        "of this clip, focusing on any moderation-relevant content."
+    )
+    mllm = get_mllm()
+    return asyncio.run(mllm.describe(clip_path, None, ask))
+
+
+def sample_frames(segment: Segment, n: int = 5) -> list[bytes]:
+    """Uniformly sample up to n JPEG frames from the shot (light percept).
+
+    Prefers the shot's own av clip; falls back to the source video offset into
+    the shot span. Returns raw JPEG bytes for the multimodal orchestrator.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    from tools import blob, storage
+
+    if segment.clip_blob:
+        path = blob.get_blob_store().url(segment.clip_blob)
+        base, dur = 0.0, max(0.1, segment.t_end - segment.t_start)
+    else:
+        video = storage.get_video(segment.video_id)
+        if not video or not video.source_blob:
+            return []
+        path = blob.get_blob_store().url(video.source_blob)
+        base, dur = segment.t_start, max(0.1, segment.t_end - segment.t_start)
+
+    n = max(1, min(n, 8))
+    frames: list[bytes] = []
+    for i in range(n):
+        t = base + dur * (i + 0.5) / n
+        fd, out = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+        try:
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
+                            "-i", path, "-frames:v", "1", "-q:v", "3", out], check=True)
+            data = open(out, "rb").read()
+            if data:
+                frames.append(data)
+        except Exception:  # noqa: BLE001 - skip an unreadable frame
+            pass
+        finally:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+    return frames
+
+
+def expand_frames(segment: Segment, n: int = 10) -> list[bytes]:
+    """Denser frame sampling when the initial percept was insufficient."""
+    return sample_frames(segment, n)
 
 
 def get_video_overview(video_id: str) -> str:
@@ -42,16 +127,23 @@ def get_video_overview(video_id: str) -> str:
 
 
 def revise_ingestion(segment_id: str, patch: dict) -> None:
+    from tools import storage
     storage.revise_ingestion(segment_id, patch)
 
 
-def propose_policy_change(change: str, rationale: str, affected: list[str]) -> None:
-    """Always queued for human approval; never auto-applied."""
+def propose_policy_change(change: str, rationale: str, affected: list[str],
+                          category: str | None = None,
+                          node_type: str | None = None) -> None:
+    """Always queued for human approval; never auto-applied. category/node_type
+    let an approver materialise the proposal into a policy node."""
+    from tools import policy_store
     policy_store.enqueue_change_request(
-        PolicyChangeRequest(req_id="", proposed_change=change,
-                            rationale=rationale, affected_segments=affected)
+        PolicyChangeRequest(req_id="", proposed_change=change, rationale=rationale,
+                            category=category, node_type=node_type,
+                            affected_segments=affected)
     )
 
 
 def emit_label(label: Label) -> None:
+    from tools import storage
     storage.save_label(label)
