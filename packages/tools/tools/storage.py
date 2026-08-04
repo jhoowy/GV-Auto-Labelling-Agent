@@ -127,3 +127,114 @@ def revise_ingestion(segment_id: str, patch: dict) -> None:
         for k, v in patch.items():
             setattr(obj, k, v)
         s.commit()
+
+
+def set_video_status(video_id: str, status: str) -> None:
+    """Advance a video's lifecycle status (e.g. -> 'labelled') without touching
+    its metadata_json or embeddings."""
+    with SessionLocal() as s:
+        obj = s.get(m.Video, video_id)
+        if obj is not None:
+            obj.status = getattr(status, "value", status)
+            s.commit()
+
+
+# --- Backend read helpers (Data Viewer / monitoring). Append-only. ---
+
+def list_videos() -> list[Video]:
+    """All videos, ordered by video_id."""
+    with SessionLocal() as s:
+        objs = s.query(m.Video).order_by(m.Video.video_id).all()
+        return [
+            Video(
+                video_id=o.video_id,
+                metadata=VideoMetadata(**(o.metadata_json or {})),
+                duration_s=o.duration_s,
+                source_blob=o.source_blob,
+                global_overview=o.global_overview,
+                status=VideoStatus(o.status),
+                text_embedding=o.text_embedding,
+            )
+            for o in objs
+        ]
+
+
+def list_videos_page(
+    search: str | None = None, page: int = 1, page_size: int = 24
+) -> dict:
+    """Paginated video cards for the gallery view.
+
+    Each item carries the title (from metadata_json), duration, status and the
+    segment count. `search` is a case-insensitive substring match on the title.
+    """
+    from sqlalchemy import func
+
+    with SessionLocal() as s:
+        seg_counts = (
+            s.query(
+                m.Segment.video_id.label("video_id"),
+                func.count(m.Segment.segment_id).label("n"),
+            )
+            .group_by(m.Segment.video_id)
+            .subquery()
+        )
+        q = s.query(m.Video, seg_counts.c.n).outerjoin(
+            seg_counts, m.Video.video_id == seg_counts.c.video_id
+        )
+        if search:
+            q = q.filter(m.Video.metadata_json["title"].astext.ilike(f"%{search}%"))
+        q = q.order_by(m.Video.video_id)
+        total = q.count()
+        rows = q.offset((page - 1) * page_size).limit(page_size).all()
+        items = [
+            {
+                "video_id": v.video_id,
+                "title": (v.metadata_json or {}).get("title"),
+                "duration_s": v.duration_s,
+                "thumbnail_url": f"/api/videos/{v.video_id}/thumbnail",
+                "status": v.status,
+                "n_segments": n or 0,
+            }
+            for v, n in rows
+        ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+def get_segment(segment_id: str) -> Segment | None:
+    """A single shot by id, or None."""
+    with SessionLocal() as s:
+        o = s.get(m.Segment, segment_id)
+        if o is None:
+            return None
+        return Segment(
+            segment_id=o.segment_id, video_id=o.video_id, idx=o.idx,
+            t_start=o.t_start, t_end=o.t_end, clip_blob=o.clip_blob,
+            transcript=o.transcript, summary=o.summary,
+            base_attributes=[Attribute(**a) for a in (o.base_attributes or [])],
+            text_embedding=o.text_embedding, image_embedding=o.image_embedding,
+            status=o.status,
+        )
+
+
+def list_labels(segment_id: str | None = None) -> list[Label]:
+    """Labels with their full trace; optionally scoped to one segment."""
+    from schemas.enums import Category
+    with SessionLocal() as s:
+        q = s.query(m.Label)
+        if segment_id is not None:
+            q = q.filter_by(segment_id=segment_id)
+        objs = q.order_by(m.Label.label_id).all()
+        return [
+            Label(
+                label_id=o.label_id, segment_id=o.segment_id,
+                category=Category(o.category), score=o.score,
+                rationale=o.rationale, cited_policy_ids=o.cited_policy_ids or [],
+                evidence_attributes=[
+                    Attribute(**a) for a in (o.evidence_attributes or [])
+                ],
+                used_segment_ids=o.used_segment_ids or [],
+                tool_trace=o.tool_trace or [],
+                confidence=o.confidence, human_verified=o.human_verified,
+            )
+            for o in objs
+        ]
