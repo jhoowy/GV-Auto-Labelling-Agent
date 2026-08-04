@@ -160,12 +160,16 @@ def list_videos() -> list[Video]:
 
 
 def list_videos_page(
-    search: str | None = None, page: int = 1, page_size: int = 24
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 24,
+    dataset: str | None = None,
 ) -> dict:
     """Paginated video cards for the gallery view.
 
     Each item carries the title (from metadata_json), duration, status and the
     segment count. `search` is a case-insensitive substring match on the title.
+    `dataset` filters on metadata_json->>'dataset' (None = all datasets).
     """
     from sqlalchemy import func
 
@@ -183,6 +187,8 @@ def list_videos_page(
         )
         if search:
             q = q.filter(m.Video.metadata_json["title"].astext.ilike(f"%{search}%"))
+        if dataset:
+            q = q.filter(m.Video.metadata_json["dataset"].astext == dataset)
         q = q.order_by(m.Video.video_id)
         total = q.count()
         rows = q.offset((page - 1) * page_size).limit(page_size).all()
