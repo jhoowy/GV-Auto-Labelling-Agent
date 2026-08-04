@@ -86,6 +86,44 @@ export interface Label {
   human_verified: boolean;
 }
 
+// DB-managed structured payloads carried on a policy node. Loosely typed —
+// backends may add fields or return legacy shapes.
+export interface AttributeValue {
+  value: string | number | boolean;
+  label?: string;
+  description?: string;
+  examples?: string[];
+}
+export interface AttributeDef {
+  kind: "attribute_def";
+  value_type: "categorical" | "ordinal" | "boolean";
+  values?: AttributeValue[];
+  guidelines?: string;
+  scores_informed?: number[];
+}
+export interface TermLevels {
+  kind: "term_levels";
+  levels: Record<string, string[]>;
+}
+export interface DecisionRuleCond {
+  attribute: string;
+  op: "==" | ">=" | "<=" | "in" | "present";
+  value?: unknown;
+}
+export interface DecisionRule {
+  when: DecisionRuleCond[];
+  score: number;
+  note?: string;
+}
+export interface DecisionTree {
+  kind: "decision_tree";
+  default: number;
+  rules: DecisionRule[];
+}
+// Union of the known payload shapes; kept alongside a permissive `any` on the
+// Policy field so the UI can read partial/legacy payloads without narrowing.
+export type StructuredData = AttributeDef | TermLevels | DecisionTree;
+
 export interface Policy {
   policy_id: string;
   type: PolicyType;
@@ -94,7 +132,8 @@ export interface Policy {
   parent_id?: string | null;
   text: string;
   structured_ref?: string | null;
-  // DB-managed structured payload: attribute_def / term_levels / decision_tree
+  // DB-managed structured payload: attribute_def / term_levels / decision_tree.
+  // Loosely typed (see StructuredData) so callers can read partial payloads.
   structured_data?: any;
   status: string;
   // some backends may return a pre-nested tree

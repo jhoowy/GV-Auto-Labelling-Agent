@@ -279,6 +279,163 @@ hr {
   margin: 14px 0;
 }
 
+/* ── Attribute dictionary ─────────────────────────────────────────────── */
+.card.highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.attr-body {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.attr-guide {
+  margin: 0;
+  color: var(--text);
+}
+.attr-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.attr-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.attr-table th,
+.attr-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.attr-table thead th {
+  background: var(--bg);
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.attr-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Decision rule tree diagram (hand-drawn SVG) ──────────────────────── */
+.dt-wrap {
+  overflow: auto;
+  max-height: 680px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 8px;
+}
+.dt-svg {
+  display: block;
+}
+.dt-edge {
+  fill: none;
+  stroke: #c2c8d0;
+  stroke-width: 1.6;
+}
+.dt-edge.match {
+  stroke: var(--ok);
+}
+.dt-pill rect {
+  fill: var(--panel);
+  stroke: #c2c8d0;
+  stroke-width: 1.2;
+}
+.dt-pill.match rect {
+  stroke: var(--ok);
+}
+.dt-pill text {
+  font-size: 10px;
+  font-weight: 700;
+  fill: var(--muted);
+}
+.dt-pill.match text {
+  fill: var(--ok);
+}
+.dt-node {
+  cursor: pointer;
+}
+.dt-node-rect {
+  fill: var(--panel);
+  stroke: var(--border);
+  stroke-width: 1.4;
+  transition: stroke 0.1s ease;
+}
+.dt-node:hover .dt-node-rect {
+  stroke: var(--accent);
+}
+.dt-node.selected .dt-node-rect {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  fill: var(--accent-soft);
+}
+.dt-nodebox {
+  height: 100%;
+  padding: 7px 10px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.dt-rulehead {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.dt-rulescore {
+  color: var(--muted);
+  font-weight: 600;
+}
+.dt-cond {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.dt-cond .dt-attr {
+  color: var(--text);
+  font-weight: 600;
+}
+.dt-cond .dt-op {
+  color: var(--accent);
+  font-weight: 700;
+}
+.dt-cond .dt-val {
+  color: var(--muted);
+}
+.dt-leafbox {
+  height: 100%;
+  padding: 7px 10px;
+  color: #fff;
+  overflow: hidden;
+}
+.dt-leaf-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dt-leaf-score {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
+.dt-leaf-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+.dt-leaf-note {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.95;
+}
+
 .db-table {
   border-collapse: collapse;
   width: 100%;
