@@ -183,10 +183,12 @@ def upsert_structured_attribute(
 def _coerce_values(values: list | None) -> list[dict] | None:
     """Normalise a `values` enum into the rich dict form.
 
-    Each value becomes `{"value","label","description","examples"}`. A plain
-    `list[str]` (legacy callers) is coerced with value=label=str and empty
-    copy; a list of dicts is filled in for any missing keys. `None` stays None
-    (boolean / unbounded attributes carry no closed value set)."""
+    Each value becomes `{"value","label","description","examples","rules"}`.
+    `rules` is a list of detailed edge-case handling notes (case ... -> this
+    value) the labelling agent reads when assigning the value; missing -> `[]`.
+    A plain `list[str]` (legacy callers) is coerced with value=label=str and
+    empty copy/rules; a list of dicts is filled in for any missing keys. `None`
+    stays None (boolean / unbounded attributes carry no closed value set)."""
     if not values:
         return None
     out: list[dict] = []
@@ -198,10 +200,11 @@ def _coerce_values(values: list | None) -> list[dict] | None:
                 "label": str(v.get("label", val)),
                 "description": str(v.get("description", "") or ""),
                 "examples": list(v.get("examples") or []),
+                "rules": [str(r) for r in (v.get("rules") or [])],
             })
         else:
             s = str(v)
-            out.append({"value": s, "label": s, "description": "", "examples": []})
+            out.append({"value": s, "label": s, "description": "", "examples": [], "rules": []})
     return out
 
 

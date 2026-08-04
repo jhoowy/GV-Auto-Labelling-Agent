@@ -163,18 +163,23 @@ def _author_prompt(cat: str, rubric: str) -> str:
         '{"rubric": "<refined 0..5 rubric text, one line per band 0..5>",\n'
         ' "attributes": [ {"name":"...", "value_type":'
         '"categorical|ordinal|boolean", "values":[ {"value":"...","label":'
-        '"...","description":"...","examples":["..."]} ], "guidelines":"...", '
-        '"scores_informed":[<ints>]} ],\n'
+        '"...","description":"...","examples":["..."],"rules":["..."]} ], '
+        '"guidelines":"...", "scores_informed":[<ints>]} ],\n'
         ' "decision_tree": {"default":0, "rules":[ {"when":[ {"attribute":'
         '"...","op":"==|>=|<=|in|present","value":<val>} ], "score":<int>, '
         '"note":"..."} ]} }\n\n'
         "Requirements: 4-8 GENERAL attributes; each is a closed-enum "
         "observation (specificity in the values, not the name); ordinal "
         "attributes list values in ASCENDING order low..high so rules compare "
-        "with >=; boolean attributes omit `values`; the decision tree is "
-        "priority-ordered (highest score first) over ONLY these attributes and "
-        "their listed values, with band 0 as the default; the rubric's bands "
-        "stay consistent with the attributes and tree. Output JSON only."
+        "with >=; boolean attributes omit `values`; each value carries a "
+        "`rules` list of 2-4 concrete edge-case handling notes in the form "
+        "'case ... -> this value' (e.g. a slot machine briefly visible in the "
+        "background of a non-gambling scene -> incidental) that disambiguate it "
+        "from neighbouring values — the labeller reads these when assigning the "
+        "value; the decision tree is priority-ordered (highest score first) "
+        "over ONLY these attributes and their listed values, with band 0 as the "
+        "default; the rubric's bands stay consistent with the attributes and "
+        "tree. Output JSON only."
     )
 
 

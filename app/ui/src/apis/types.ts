@@ -93,6 +93,9 @@ export interface AttributeValue {
   label?: string;
   description?: string;
   examples?: string[];
+  // Detailed edge-case handling notes ("case ... -> this value") the labelling
+  // agent reads when assigning this value. Missing/legacy payloads -> [].
+  rules?: string[];
 }
 export interface AttributeDef {
   kind: "attribute_def";
