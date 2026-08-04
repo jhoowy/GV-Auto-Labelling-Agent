@@ -43,15 +43,15 @@ flowchart TB
     direction TB
     LOAD["LOAD — window + ASR 병합 + 프레임 ≤5"]
     RET["RETRIEVE — 정책 + 선례"]
-    JUDGE["JUDGE — policy attr 파생 · N개 카테고리 채점 · 일관성 체크"]
-    SFX["SIDE_FX — revise_ingestion / propose_policy_change"]
+    JUDGE["JUDGE — attr 추출 · 결정 트리 적용 · holistic fallback"]
+    SFX["SIDE_FX — propose_policy_change / rule-change 요청"]
     COM["COMMIT — 라벨 저장 + carry-over"]
     LOAD --> RET --> JUDGE --> SFX --> COM
   end
 
   STORE --> LOAD
   POL --> RET
-  COM --> LBL["shot × 카테고리별 Label:<br/>score 0..5 · rationale · (policy_id, version) pin · trace"]
+  COM --> LBL["shot × 카테고리별 Label:<br/>score 0..5 · rationale · evidence_attributes · (policy_id, version) pin"]
   LBL --> STORE
 ```
 
@@ -82,18 +82,31 @@ language / thumbnail)는 별도로 수집해 `videos.metadata_json`에 저장한
    정책이 바뀌어도 재계산이 필요 없다.
 3. **영상 전체** — `global_overview`(shot summary 집계, text embedding)와
    **word-level ASR** utterance(Qwen3-ASR + forced aligner, 고정 window)를 영상
-   타임라인 기준으로 별도 `utterances` 테이블에 저장.
+   타임라인 기준으로 별도 `utterances` 테이블에 저장. ASR에는 수집된 메타데이터에서
+   얻은 **언어 힌트**(오디오 언어 ISO 코드를 정식 영어 이름으로 매핑)를 전달해
+   auto-detect가 비영어 오디오를 오분류(예: 한국어를 중국어로)하지 않도록 한다.
 
-Attribute는 **2계층**이다: `base`(여기, ingestion) vs `policy`(이후 에이전트가
-파생). `Attribute.layer`가 이를 구분한다.
+구체적인 `base_attributes`는 이미 생성된 데이터에서 파생하는 모델 없는 관측치다
+— `has_speech`, `shot_seconds`, `asr_word_count`, `summary_len` — 의도적으로
+사실 위주이며 카테고리 판정이 아니다(판정은 에이전트의 몫). Attribute는
+**2계층**이다: `base`(여기, ingestion) vs `policy`(이후 에이전트가 파생).
+`Attribute.layer`가 이를 구분한다.
 
 ## Labelling 축 (에이전트, 정책 의존)
 
-에이전트는 shot window와 **버전된 정책 세트**, **선례(precedent)**(유사 shot +
-그 확정 라벨)를 읽고, shot × 카테고리마다 `Label`을 생성한다. 모든 라벨은 사용한
-`(policy_id, version)`을 pin하고 전체 `tool_trace`를 담는다 — 이 pin + trace가
-라벨을 감사 가능하게 만든다. 판정 중 파생된 policy-layer attribute는 evidence로
-첨부된다.
+각 카테고리의 정책은 세 부분이다 — **scoring 루브릭**, **attribute
+definition**(일반적 관측 신호, 각각 닫힌 enum 또는 ordinal), **결정 규칙 트리** —
+모두 버전된 노드다. 에이전트는 shot window와 **버전된 정책 세트**,
+**선례(precedent)**(유사 shot + 그 확정 라벨)를 읽고, shot × 카테고리마다 `Label`을
+생성한다. attribute definition + 규칙 트리가 있는 카테고리는 shot에서 정의된 각
+attribute를 **추출**한 뒤 트리를 **결정적으로 적용**해 점수를 낸다. 합성된 정책이
+없는 카테고리는 holistic 채점으로 폴백한다.
+
+라벨의 감사 기록은 **evidence_attributes**(추출된 신호 + evidence + attribute
+노드의 version), **cited_policy_ids**(attribute-def 노드와 규칙 노드의 정규
+`(policy_id, version)` pin), 그리고 rationale에 담긴 매칭 규칙 note다.
+`policy_versions` 히스토리가 pin된 정확한 텍스트를 재현한다. (`tool_trace`에는 단일
+compact `{"decision": …}` 항목만 남는다 — 이전의 장황한 stage/tool 덤프는 제거됨.)
 
 상태 머신은 **[AGENT_WORKFLOW.ko.md](AGENT_WORKFLOW.ko.md)** 참고.
 
@@ -104,7 +117,8 @@ Attribute는 **2계층**이다: `base`(여기, ingestion) vs `policy`(이후 에
 | `videos` | metadata_json, duration_s, source_blob, global_overview, text_embedding, status | ingestion + 메타데이터 수집 |
 | `segments` | idx, t_start/t_end, clip_blob, transcript, summary, base_attributes, text/image_embedding | ingestion |
 | `utterances` | idx, t_start/t_end, text | ingestion (ASR) |
-| `policies` | type, category, version, parent_id, text, embedding, structured_ref | policy store / bootstrap |
+| `policies` | type (scoring/attribute/decision_rule/edge_case), category, version, parent_id, text, embedding, structured_data | policy store / bootstrap |
+| `policy_versions` | policy_id, version, type, category, text, structured_data, created_at | policy store (append-only 히스토리) |
 | `policy_sets` | version, policy_versions 맵 | policy 스냅샷 |
-| `labels` | category, score, rationale, cited_policy_ids, evidence_attributes, used_segment_ids, tool_trace | labelling 에이전트 |
-| `policy_change_requests` | proposed_change, rationale, status | 에이전트 SIDE_FX (human 승인 대기) |
+| `labels` | category, score, rationale, cited_policy_ids, evidence_attributes, used_segment_ids, tool_trace (compact decision) | labelling 에이전트 |
+| `policy_change_requests` | proposed_change, rationale, category, node_type, target_policy_id, status | 에이전트 SIDE_FX (human 승인 대기) |

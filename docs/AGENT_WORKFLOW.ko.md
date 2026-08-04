@@ -15,8 +15,10 @@ flowchart LR
   COMMIT -->|"cursor ≥ n (완료)"| E((종료))
 ```
 
-이전 초안의 `DERIVE`와 `CHECK`는 **JUDGE로 흡수**되었다 (policy attribute 파생과
-선례 일관성 체크가 판정 단계 안에서 수행됨). `SIDE_FX`는 유지된다.
+이전 초안의 `DERIVE`와 `CHECK`는 **JUDGE로 흡수**되었다: 합성된 정책이 있는
+카테고리는 JUDGE가 정의된 attribute를 추출하고 결정 규칙 트리를 적용한다. 아직
+holistic 폴백인 카테고리는 판정 단계 안에서 구조화 신호를 파생하고 선례 일관성을
+체크한다. `SIDE_FX`는 유지된다.
 
 ## Orchestrator 모델
 
@@ -57,39 +59,72 @@ policy.categories`, 현재 gambling / bad_language / sex)에서 N-길이 리스�
 `window_stride`개 shot이 **confirm** shot(이번 스텝에 commit)이고, 나머지는 이웃
 컨텍스트다. 각 shot의 `[t_start, t_end]`와 겹치는 `utterances`를 ASR 텍스트로
 병합한다. `clip_blob`에서 confirm shot마다 uniform 프레임 ≤ 5장을 샘플링한다.
-스텝마다 새로운 `tool_trace`를 초기화한다. 도구: storage 읽기, 프레임 샘플러.
+디버깅용 run-scoped 스텝 `tool_trace`를 매 스텝 초기화하지만, 이는 라벨이 담는
+것이 **아니다** — 라벨의 감사 기록은 JUDGE(아래)에서 설정된다. 도구: storage 읽기,
+프레임 샘플러.
 
 ### RETRIEVE
-- `search_policies` — 활성 카테고리의 정책 노드(rubric / attribute / edge-case)에
-  대한 hybrid(pgvector dense + BM25) 검색.
+- `search_policies` — 활성 카테고리의 정책 노드(scoring 루브릭 / attribute
+  definition / decision rule / edge-case)에 대한 hybrid(pgvector dense + BM25)
+  검색.
 - `find_similar_segments` — 가장 유사한 shot + **그 확정 라벨**(선례 조회; 주된
   일관성 신호).
 
 도구: retrieval 전용.
 
 ### JUDGE  *(DERIVE + CHECK 흡수)*
-confirm shot마다 orchestrator에 멀티모달 호출 1회, 이후 정리(bookkeeping):
+판정은 **confirm shot마다, 카테고리마다** 이뤄지며, 카테고리에 합성된 정책이
+있는지에 따라 두 경로 중 하나를 탄다:
 
 ```mermaid
 flowchart TB
-  IN["프레임 ≤5 + summary + ASR 텍스트<br/>+ 검색된 정책 + 선례 라벨"]
-  IN --> DER["policy-layer attribute 파생<br/>(예: ASR에 대해 word-list로 욕설 매칭)"]
-  DER --> SC["N개 카테고리 각각 채점:<br/>0..5 · rationale · (policy_id, version) pin · evidence"]
-  SC --> CK{"선례와 비교"}
-  CK -->|"배치(divergent)"| ISS["precedent_divergence issue 기록<br/>(자동 재판정 없음)"]
-  CK -->|"프레임 부족"| EXP["expand_frames → shot 1회 재판정"]
+  IN["confirm shot × 카테고리"]
+  IN --> Q{"attribute def<br/>+ decision-rule 트리?<br/>(그리고 bootstrap 아님)"}
+
+  Q -->|"예 — attribute 기반"| EX["정의된 각 attribute 추출<br/>(value + evidence): 프레임 ≤5 + summary + ASR"]
+  EX --> AP["결정 규칙 트리를 결정적으로 적용<br/>(우선순위 순; 첫 매칭 win, 없으면 default)"]
+  AP --> SC1["score + rationale (매칭 규칙 note)<br/>evidence_attributes · cited pin (attr-def + rule 노드)"]
+  AP -->|"트리가 안 맞음"| RC["rule-change 요청 큐잉<br/>(decision-rule 노드 타깃)"]
+
+  Q -->|"정책 없음 / bootstrap — holistic"| HD["구조화 신호 파생<br/>(예: ASR에 term-level word-list로 욕설 매칭)"]
+  HD --> HS["N개 카테고리에 멀티모달 채점 호출 1회<br/>0..5 · rationale · cited pin · evidence"]
+  HS --> CK{"선례와 비교"}
+  CK -->|"배치(divergent)"| ISS["decision 항목에 precedent_divergence 기록<br/>(자동 재판정 없음)"]
+
+  EX -.->|"프레임 부족"| EXP["expand_frames → 1회 재추출"]
+  HS -.->|"프레임 부족"| EXP
 ```
 
+**Attribute 기반 경로**(카테고리에 ATTRIBUTE definition + DECISION_RULE 트리 존재):
+카테고리당 추출 호출 1회가 정의된 각 attribute를 닫힌 enum / ordinal에 맞춰
+value + evidence로 해석하고, 이후 트리를 코드에서 **결정적으로** 적용한다(채점
+호출 없음). 첫 완전 매칭 규칙의 score가 win, 없으면 트리 default. orchestrator가
+트리가 안 맞는다고 표시하면(또는 아무것도 매칭 안 되고 gap을 보고하면) JUDGE는
+그 decision-rule 노드를 타깃으로 **rule-change 요청을 큐잉**한다 — 큐잉만, 자동
+적용 없음.
+
+**Holistic 폴백**(합성된 정책이 없는 카테고리, 그리고 bootstrap 중의 *모든*
+카테고리): 멀티모달 호출 1회가 프레임 + summary + ASR에서 직접 카테고리를 채점하며,
+먼저 구조화 term-level 신호를 파생하고 선례 divergence를 decision 항목에 기록한다.
+
 구조화 출력은 **강제하지 않는다**; 모델이 반환한 JSON 유사 텍스트를 관대하게
-파싱한다. 일관성 divergence는 나중에 human manager가 group화해 판단하도록
-**issue로 기록**되며, 자동 보정되지 않는다.
-도구: `expand_frames`, `lookup_structured`, orchestrator 호출.
+파싱한다. 일관성 divergence는 자동 보정하지 않고 **기록**된다.
+도구: `sample_frames` / `expand_frames`, `search_policies` 결과, 정책 트리,
+orchestrator 호출.
 
 ### SIDE_FX
-여기서만 도달 가능한 부수효과(side effect):
-- `revise_ingestion` — ingestion 산출물에 대한 자동 적용 보정; 원본은 revision
-  log와 함께 보존된다.
+JUDGE가 만든 proposal을 shape별로 dispatch한다(여기서만 도달 가능):
 - `propose_policy_change` — **항상** human 승인 대기 큐로; 자동 적용되지 않는다.
+  attribute 기반 **rule-change 요청**(`node_type=decision_rule`,
+  `target_policy_id` = 규칙 노드)과 bootstrap 자유 텍스트 gap 제안
+  (`node_type` = attribute / edge_case)을 모두 포함한다.
+- `define_structured_attribute` — **bootstrap 전용 직접 upsert**로 구조화
+  term-level ATTRIBUTE 노드를 초안 작성(human 게이트 없음; 전체 초안 트리는
+  policy-set v1 스냅샷 전에 검토됨).
+
+승인 시 큐잉된 요청은 해당 카테고리의 scoring 루브릭 아래 ATTRIBUTE / EDGE_CASE
+노드로 **materialise**된다(`resolve_change_request`). 편집된 attribute나 summary에
+대한 콘텐츠 변경 이력(revision log)은 계획된 후속 작업이며 아직 구현되지 않았다.
 
 ### COMMIT
 각 draft `Label`을 저장(`storage.save_label`)하고 롤링 `carry_over` 요약을
@@ -98,14 +133,20 @@ flowchart TB
 
 ## Issues 로그
 
-라벨별 rationale 외에, 에이전트는 human 검토용 구조화 노트인 **issue**를 trace에
-기록한다. 예: `precedent_divergence`, 저신뢰 판정. 이들은 자동으로 처리되지 않고
-**human manager가 group화해 분류(triage)** 하도록 의도된 것이다. (오디오 입력
-부재 같은 더 큰 기능 공백은 per-run trace가 아니라 **저장소 issue**로 추적한다.)
+라벨별 rationale 외에, holistic 경로는 점수가 유사 shot의 확정 라벨과 크게
+어긋날 때 라벨의 compact `decision` 항목 안에 **precedent_divergence**를
+기록한다 — human manager가 group화해 분류(triage)하도록 보존되며 자동 보정되지
+않는다. (오디오 입력 부재 같은 더 큰 기능 공백은 per-run trace가 아니라 **저장소
+issue**로 추적한다.)
 
 ## 출력 계약(Output contract)
 
 판정된 각 shot은 `Label` row를 만든다(`packages/schemas` 참고): `category`,
 `score`, `rationale`, `cited_policy_ids`, `evidence_attributes`,
-`used_segment_ids`, `tool_trace`, `confidence`. `(policy_id, version)` pin과
-trace가 모든 라벨을 재현·감사 가능하게 만든다.
+`used_segment_ids`, `tool_trace`, `confidence`. 라벨의 감사 기록은
+**evidence_attributes**(추출된 attribute + evidence + attribute 노드의 version),
+정규 `(policy_id, version)` pin인 **cited_policy_ids**(attribute-def 노드 + 규칙
+노드, 환각 id는 제거되고 실제 version이 재부착됨), 그리고 rationale에 담긴 매칭
+규칙 note다. `tool_trace`에는 단일 compact `{"decision": …}` 항목만 남는다 —
+이전의 장황한 stage/tool 덤프는 제거됨. 이 pin들은 `policy_versions` 히스토리를
+통해 사용된 정확한 텍스트로 해석되어 모든 라벨을 재현·감사 가능하게 만든다.

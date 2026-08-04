@@ -31,7 +31,7 @@ flowchart TB
   end
 
   subgraph POL["POLICY · versioned node tree"]
-    PT["rubric / attribute / edge-case<br/>+ version history + set snapshots"]
+    PT["scoring rubric / attribute defs / decision rule / edge-case<br/>+ version history + set snapshots"]
     PQ["change-request queue → materialise"]
   end
 
@@ -45,7 +45,7 @@ flowchart TB
   IDS --> ING --> STORE
   STORE --> LAB
   LAB <-->|"policy RAG + precedents"| POL
-  LAB -->|"labels + full trace"| STORE
+  LAB -->|"labels + evidence + pins"| STORE
   STORE --> SVC
   POL --> SVC
   API --> UI
@@ -117,6 +117,7 @@ erDiagram
     int score
     text rationale
     jsonb cited_policy_ids
+    jsonb evidence_attributes
     jsonb tool_trace
     float confidence
   }
@@ -127,13 +128,17 @@ erDiagram
     int version
     string parent_id
     text text
-    string structured_ref
+    jsonb structured_data
   }
   POLICY_VERSIONS {
     int id PK
     string policy_id
     int version
+    string type
+    string category
     text text
+    jsonb structured_data
+    datetime created_at
   }
   POLICY_SETS {
     int version PK
@@ -145,6 +150,7 @@ erDiagram
     text proposed_change
     string category
     string node_type
+    string target_policy_id
     string status
   }
 ```
@@ -168,7 +174,11 @@ flowchart LR
 ```
 
 Boundaries are frozen here (the agent never changes them). The Omni segmenter is
-a deliberate placeholder for a future dedicated shot-cut model.
+a deliberate placeholder for a future dedicated shot-cut model. `base_attributes`
+are model-free facts computed from data already produced (`has_speech`,
+`shot_seconds`, `asr_word_count`, `summary_len`) — no longer a gap. ASR receives a
+**language hint** from the fetched metadata (ISO code → full English name) so
+auto-detect does not mislabel non-English audio.
 
 ## Labelling agent (LangGraph)
 
@@ -180,28 +190,50 @@ flowchart LR
 ```
 
 A shot window slides (`size 5 / stride 3`) with a rolling carry-over summary and
-the always-injected global overview. **JUDGE** is a single multimodal call
-(≤5 sampled frames + summary + ASR + retrieved policies + precedents) that scores
-**N configurable categories**, derives policy attributes, and flags precedent
-divergence as trace issues. Full stage/tool detail in
-[AGENT_WORKFLOW.md](AGENT_WORKFLOW.md).
+the always-injected global overview. **JUDGE** is per shot × category and takes
+one of two routes: a category with **attribute definitions + a decision-rule
+tree** has each defined attribute extracted (value + evidence) from ≤5 frames +
+summary + ASR, then the tree is applied **deterministically** to a score;
+categories with no synthesised policy — and every category during bootstrap — use
+the **holistic multimodal fallback** (one scoring call). A label's provenance is
+its `evidence_attributes`, its canonical `(policy_id, version)` pins, and the
+matched-rule note; `tool_trace` keeps only a compact `decision` entry. Full
+stage/tool detail in [AGENT_WORKFLOW.md](AGENT_WORKFLOW.md).
 
 ## Policy tree & bootstrap loop
 
+A category's policy is three parts, each a versioned node under the category root:
+a **scoring rubric** (SCORING), **attribute definitions** (ATTRIBUTE — general
+observable signals: a closed enum or ordinal with per-value label/description/
+examples, detection guidelines, and the score bands they inform, in
+`structured_data.kind = attribute_def`), and a **decision rule tree**
+(DECISION_RULE — `structured_data.kind = decision_tree` with a `default` and
+priority-ordered `rules`; first fully-matching rule wins, else the default), plus
+incremental EDGE_CASE nodes. Every node is versioned and each edit appends a
+`policy_versions` snapshot so a label's `(policy_id, version)` pin reproduces the
+exact text.
+
 ```mermaid
 flowchart TB
-  SEED["seed PEGI rubrics (v0)<br/>+ profanity word-list ATTRIBUTE"] --> RUN
-  RUN["label bootstrap videos<br/>(precedent retrieval OFF)"] --> GAP["agent proposes policy gaps"]
+  SEED["seed PEGI scoring rubrics (v0)"] --> RUN["label bootstrap videos<br/>(precedent retrieval OFF)"]
+  RUN --> SYN["synthesise per category:<br/>attribute defs + decision-rule tree<br/>(draft nodes)"]
+  RUN --> GAP["agent proposes free-text edge-case gaps"]
   GAP --> Q["change-request queue"]
   Q --> REV{"human review"}
   REV -->|approve| MAT["materialise ATTRIBUTE / EDGE_CASE node"]
   REV -->|reject| X["discard"]
+  SYN --> HR["human review of draft tree"]
   MAT --> SNAP["snapshot policy-set v1"]
+  HR --> SNAP
 ```
 
 Bootstrap reuses the normal agent loop with cross-data retrieval disabled (no
-confirmed labels exist yet). Proposals are **always** human-gated; approving one
-materialises a real node under the category's scoring rubric.
+confirmed labels exist yet); only scoring rubrics are seeded. After exploring the
+bootstrap videos, `synthesize_category_policy` drafts each category's attribute
+definitions + a decision-rule tree **from the observed segments** — direct draft
+writes, human-reviewed before a policy-set v1 snapshot. Free-text edge-case
+proposals are **always** human-gated; approving one materialises a real ATTRIBUTE
+/ EDGE_CASE node under the category's scoring rubric.
 
 ## Model roles & providers
 
@@ -224,7 +256,7 @@ default.
 |----------|---------|
 | `GET /api/videos?search=&page=&page_size=` | paginated gallery (title/duration/thumbnail/n_segments) |
 | `GET /api/videos/{id}` · `/segments` · `/thumbnail` | video detail, shots, JPEG thumbnail |
-| `GET /api/labels?segment_id=` | labels with full trace |
+| `GET /api/labels?segment_id=` | labels with evidence attributes + policy pins |
 | `GET /api/policies?category=` · `GET /api/policy-sets` | policy tree + set versions |
 | `GET/POST /api/policy-change-requests[/{id}/resolve]` | review queue; approve → materialise |
 | `GET /api/db/tables[/{name}]` | read-only DB browser (vector cols summarised) |
