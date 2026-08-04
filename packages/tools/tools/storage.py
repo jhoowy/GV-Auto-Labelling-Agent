@@ -34,7 +34,16 @@ def _apply_segment(obj: "m.Segment", seg: Segment) -> None:
 def upsert_video(video: Video) -> None:
     with SessionLocal() as s:
         obj = s.get(m.Video, video.video_id) or m.Video(video_id=video.video_id)
-        obj.metadata_json = video.metadata.model_dump()
+        # Merge, don't clobber: ingestion rebuilds a thin VideoMetadata (title /
+        # channel / description / thumbnail), but the row may already carry rich
+        # collected fields (dataset, tags, default_audio_language, pegi GT). Keep
+        # existing keys and overlay only non-empty incoming values so a re-ingest
+        # never wipes collection metadata.
+        merged = dict(obj.metadata_json or {})
+        for k, v in video.metadata.model_dump().items():
+            if v not in (None, "", [], {}):
+                merged[k] = v
+        obj.metadata_json = merged
         obj.duration_s = video.duration_s
         obj.source_blob = video.source_blob
         obj.global_overview = video.global_overview
