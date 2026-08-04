@@ -12,6 +12,7 @@ import type {
   PolicySet,
   Segment,
   TrackedSegment,
+  TranslateSummary,
   Video,
   VideoListItem,
 } from "./types";
@@ -87,6 +88,14 @@ export const listPolicySets = () => api<PolicySet[]>(`/api/policy-sets`);
 
 export const listChangeRequests = (status = "queued") =>
   api<PolicyChangeRequest[]>(`/api/policy-change-requests${qs({ status })}`);
+
+// Populate Korean (presentation-only) translations for a category's nodes.
+// Version-cached server-side: only changed nodes are re-translated.
+export const translatePolicies = (category: string) =>
+  api<TranslateSummary>(
+    `/api/policies/${encodeURIComponent(category)}/translate`,
+    { method: "POST" },
+  );
 
 export const resolveChangeRequest = (reqId: string, approve: boolean) =>
   api<PolicyChangeRequest | { req_id: string; approved: boolean }>(

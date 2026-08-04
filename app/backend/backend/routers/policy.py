@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from tools import db_browser, policy_store, tracking
+from tools import db_browser, policy_store, tracking, translate
 
 router = APIRouter(prefix="/api", tags=["policy"])
 
@@ -11,6 +11,14 @@ router = APIRouter(prefix="/api", tags=["policy"])
 @router.get("/policies")
 def get_policy_tree(category: str):
     return policy_store.get_policy_tree(category)
+
+
+@router.post("/policies/{category}/translate")
+def translate_category(category: str):
+    """Populate Korean (presentation-only) translations for a category's policy
+    nodes. Idempotent + version-cached: only nodes changed since their last
+    translation are re-run. Returns {translated, skipped} node-id summary."""
+    return translate.translate_category(category)
 
 
 @router.get("/policies/{category}/rule/{rule_index}/segments")

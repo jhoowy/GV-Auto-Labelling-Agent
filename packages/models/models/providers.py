@@ -359,6 +359,32 @@ class GeminiOrchestrator:
         return self._generate(None, [types.Part.from_text(text=text)], json_out=False)
 
 
+def _openai_complete_json(model: str, system: str, user: str) -> dict:
+    """OpenAI chat/completions with a forced JSON-object response.
+
+    Shared by the OpenAI-backed text roles (policy author, translator). The API
+    key is read at call time from OPENAI_API_KEY so `import models` needs no key;
+    reasoning models get no custom temperature."""
+    import os
+
+    from openai import OpenAI  # local import: no key needed to import models
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    r = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+    )
+    content = r.choices[0].message.content or "{}"
+    try:
+        obj = json.loads(content)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", content, re.S)
+        obj = json.loads(m.group(0)) if m else {}
+    return obj if isinstance(obj, dict) else {}
+
+
 class OpenAIPolicyAuthor:
     """Text-only JSON author for data-independent policy design (config
     `policy_llm`). Uses the OpenAI chat/completions API with a forced JSON
@@ -371,24 +397,31 @@ class OpenAIPolicyAuthor:
 
     @observe(name="gpt.policy_author", as_type="generation")
     def complete_json(self, system: str, user: str) -> dict:
-        import os
+        return _openai_complete_json(self.model, system, user)
 
-        from openai import OpenAI  # local import: no key needed to import models
 
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        r = client.chat.completions.create(
-            model=self.model,
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-        )
-        content = r.choices[0].message.content or "{}"
+# Presentation-layer translation is optional: profiles may omit the role, so a
+# code default (openai/gpt-5-mini) keeps `get_translation_llm()` addressable.
+_TRANSLATION_DEFAULT = {"provider": "openai", "model": "gpt-5-mini"}
+
+
+class OpenAITranslator:
+    """Text-only JSON translator for presentation-layer policy i18n (config
+    `translation_llm`, default gpt-5-mini). Same OpenAI chat/completions JSON
+    contract as OpenAIPolicyAuthor — reasoning model, no custom temperature,
+    forced JSON. English stays authoritative; this only renders a parallel copy
+    (e.g. Korean) for human reviewers."""
+
+    def __init__(self, profile_name: str | None = None):
         try:
-            obj = json.loads(content)
-        except json.JSONDecodeError:
-            m = re.search(r"\{.*\}", content, re.S)
-            obj = json.loads(m.group(0)) if m else {}
-        return obj if isinstance(obj, dict) else {}
+            spec = role_spec("translation_llm", profile_name)
+        except KeyError:
+            spec = _TRANSLATION_DEFAULT  # role is optional; fall back to the code default
+        self.model = spec["model"]
+
+    @observe(name="gpt.translator", as_type="generation")
+    def complete_json(self, system: str, user: str) -> dict:
+        return _openai_complete_json(self.model, system, user)
 
 
 def get_agent_llm(profile_name: str | None = None) -> GeminiOrchestrator:
@@ -405,6 +438,18 @@ def get_policy_llm(profile_name: str | None = None) -> OpenAIPolicyAuthor:
     if prov == "openai":
         return OpenAIPolicyAuthor(profile_name)
     raise _unimplemented(prov, "policy_llm")
+
+
+def get_translation_llm(profile_name: str | None = None) -> OpenAITranslator:
+    """Text JSON translator for presentation-layer policy i18n (config
+    `translation_llm`; defaults to openai/gpt-5-mini when the profile omits it)."""
+    try:
+        prov = _provider("translation_llm", profile_name)
+    except KeyError:
+        prov = _TRANSLATION_DEFAULT["provider"]  # optional role -> code default
+    if prov == "openai":
+        return OpenAITranslator(profile_name)
+    raise _unimplemented(prov, "translation_llm")
 
 
 def get_text_embedder(profile_name: str | None = None) -> Embedder:

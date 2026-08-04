@@ -9,6 +9,7 @@ import {
   listChangeRequests,
   listPolicySets,
   resolveChangeRequest,
+  translatePolicies,
 } from "../../apis/client";
 import type {
   Category,
@@ -26,13 +27,65 @@ import {
   scoreColor,
 } from "../../components/ui";
 
+// Presentation language for the policy tree. English is authoritative; KO
+// renders stored Korean translations (structured_data.i18n.ko), per-field
+// falling back to English where a Korean string is missing.
+type Lang = "en" | "ko";
+
+function LangToggle({ lang, onChange }: { lang: Lang; onChange: (l: Lang) => void }) {
+  return (
+    <div className="row" role="group" aria-label="Language" style={{ gap: 4 }}>
+      {(["en", "ko"] as Lang[]).map((l) => (
+        <button
+          key={l}
+          className={`btn${lang === l ? " ok" : ""}`}
+          aria-pressed={lang === l}
+          onClick={() => onChange(l)}
+        >
+          {l === "en" ? "EN" : "한국어"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function PolicyManager() {
   const [category, setCategory] = useState<Category>("gambling");
+  const [lang, setLang] = useState<Lang>("en");
+  // Bumped after a translate run to remount the tree section and refetch.
+  const [nonce, setNonce] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function runTranslate() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await translatePolicies(category);
+      setMsg(`Translated ${r.n_translated} node(s), skipped ${r.n_skipped} already up to date.`);
+      setLang("ko");
+      setNonce((n) => n + 1);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="grid" style={{ gap: 20 }}>
       <div className="row spread">
         <h1>Policy Manager</h1>
-        <div className="row">
+        <div className="row" style={{ gap: 10 }}>
+          <LangToggle lang={lang} onChange={setLang} />
+          <button
+            className="btn"
+            disabled={busy}
+            onClick={runTranslate}
+            title="Populate Korean translations for this category (presentation only)"
+          >
+            {busy ? "Translating…" : "Translate → 한국어"}
+          </button>
           <span className="muted small">Category</span>
           <select
             style={{ width: 180 }}
@@ -47,11 +100,33 @@ export default function PolicyManager() {
           </select>
         </div>
       </div>
-      <PolicyTreeSection category={category} />
+      {msg && <div className="small muted">{msg}</div>}
+      <PolicyTreeSection key={`${category}-${nonce}`} category={category} lang={lang} />
       <PolicySetSection />
       <QueueSection />
     </div>
   );
+}
+
+// ── i18n helpers ───────────────────────────────────────────────────────────
+// The stored Korean payload on a node's structured_data, if any.
+function koOf(sd: any): any {
+  return sd && typeof sd === "object" && sd.i18n && typeof sd.i18n === "object"
+    ? sd.i18n.ko
+    : null;
+}
+// Korean string when KO is active and present+non-empty; else the English source.
+function tr(lang: Lang, ko: any, en: any): string {
+  if (lang === "ko" && typeof ko === "string" && ko.trim()) return ko;
+  return en === undefined || en === null ? "" : String(en);
+}
+// Korean rules list when KO is active and it aligns 1:1 with English; else English
+// (per-item fallback keeps the list intact if a single string is blank).
+function trRules(lang: Lang, ko: any, en: any[]): string[] {
+  if (lang === "ko" && Array.isArray(ko) && ko.length === en.length) {
+    return ko.map((r, i) => (typeof r === "string" && r.trim() ? r : String(en[i])));
+  }
+  return en.map((r) => String(r));
 }
 
 function PolicySetSection() {
@@ -174,7 +249,7 @@ function SegmentTrackPanel({
   );
 }
 
-function PolicyTreeSection({ category }: { category: Category }) {
+function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang }) {
   const { data, loading, error } = useAsync(() => getPolicies(category), [category]);
   const flat = data ?? [];
   const roots = normalizeTree(flat);
@@ -221,6 +296,7 @@ function PolicyTreeSection({ category }: { category: Category }) {
                       depth={0}
                       highlighted={highlighted}
                       category={category}
+                      lang={lang}
                     />
                   ))}
                 </div>
@@ -237,6 +313,7 @@ function PolicyTreeSection({ category }: { category: Category }) {
                 depth={0}
                 highlighted={highlighted}
                 category={category}
+                lang={lang}
               />
             ))}
         </div>
@@ -244,6 +321,7 @@ function PolicyTreeSection({ category }: { category: Category }) {
           node={decisionNode}
           selected={selectedRule}
           onSelect={(i) => setSelectedRule((cur) => (cur === i ? null : i))}
+          lang={lang}
         />
         {/* Selecting a rule also lists the segments it labelled. */}
         {selectedRule != null && (
@@ -295,12 +373,16 @@ function AttributeBody({
   category,
   attr,
   highlight,
+  lang,
 }: {
   sd: any;
   category: Category;
   attr: string;
   highlight: boolean;
+  lang: Lang;
 }) {
+  // Korean payload for this attribute, if translated (structured_data.i18n.ko).
+  const ko = koOf(sd);
   // The attribute value whose labelled segments are currently expanded.
   const [active, setActive] = useState<string | null>(null);
   // Collapsed by default; a rule click (`highlight`) auto-opens this attribute.
@@ -388,7 +470,9 @@ function AttributeBody({
             ))}
           </span>
         )}
-        {sd.guidelines && <p className="attr-guide small">{String(sd.guidelines)}</p>}
+        {sd.guidelines && (
+          <p className="attr-guide small">{tr(lang, ko?.guidelines, sd.guidelines)}</p>
+        )}
         {values.length > 0 && (
           <div className="attr-table-wrap">
             <table className="attr-table">
@@ -408,6 +492,9 @@ function AttributeBody({
                   const ex = Array.isArray(obj.examples) ? obj.examples : [];
                   const rules = Array.isArray(obj.rules) ? obj.rules : [];
                   const valStr = String(obj.value ?? "");
+                  // Korean overrides for this value (value key itself is never translated).
+                  const koVal = ko?.values?.[valStr];
+                  const dispRules = trRules(lang, koVal?.rules, rules);
                   return (
                     <tr key={i}>
                       {ordinal && <td className="muted mono">{i}</td>}
@@ -431,13 +518,13 @@ function AttributeBody({
                           {valStr}
                         </button>
                       </td>
-                      <td>{String(obj.label ?? "")}</td>
-                      <td className="small">{String(obj.description ?? "")}</td>
+                      <td>{tr(lang, koVal?.label, obj.label)}</td>
+                      <td className="small">{tr(lang, koVal?.description, obj.description)}</td>
                       <td className="small">
-                        {rules.length > 0 ? (
+                        {dispRules.length > 0 ? (
                           <ul style={{ margin: 0, paddingLeft: 16, display: "grid", gap: 3, maxWidth: 360 }}>
-                            {rules.map((r: any, j: number) => (
-                              <li key={j}>{String(r)}</li>
+                            {dispRules.map((r: string, j: number) => (
+                              <li key={j}>{r}</li>
                             ))}
                           </ul>
                         ) : (
@@ -659,21 +746,29 @@ function DecisionTreeDiagram({
   node,
   selected,
   onSelect,
+  lang,
 }: {
   node: Policy | null;
   selected: number | null;
   onSelect: (i: number) => void;
+  lang: Lang;
 }) {
   const sd = node?.structured_data;
   if (!node || !sd || sd.kind !== "decision_tree") return null;
   const rules: any[] = Array.isArray(sd.rules) ? sd.rules : [];
   const def = Number(sd.default ?? 0);
+  // Korean rule-note overrides (index-aligned to `rules`); notes only.
+  const ko = koOf(sd);
+  const koRules: any[] = Array.isArray(ko?.rules) && ko.rules.length === rules.length
+    ? ko.rules
+    : [];
 
   // Build the branching tree from the priority list: rule i's YES leaf carries
   // its score/note; its NO points to rule i+1, and the last NO to `default`.
   const nodes: Record<string, TreeNode> = {};
   rules.forEach((r, i) => {
     const score = Number(r?.score ?? 0);
+    const note = tr(lang, koRules[i]?.note, r?.note);
     nodes[`q${i}`] = {
       kind: "question",
       id: `q${i}`,
@@ -688,7 +783,7 @@ function DecisionTreeDiagram({
       id: `y${i}`,
       index: i,
       score,
-      note: r?.note ? String(r.note) : undefined,
+      note: note ? note : undefined,
       tag: `score ${score}`,
       h: DT.LEAF_H,
     };
@@ -698,7 +793,7 @@ function DecisionTreeDiagram({
     id: "def",
     index: null,
     score: def,
-    note: "no rule matched",
+    note: tr(lang, ko?.default_note, "no rule matched"),
     tag: "default",
     h: DT.LEAF_H,
   };
@@ -760,11 +855,13 @@ function PolicyNode({
   depth,
   highlighted,
   category,
+  lang,
 }: {
   node: Policy;
   depth: number;
   highlighted: Set<string>;
   category: Category;
+  lang: Lang;
 }) {
   const isAttr = node.type === "attribute";
   const key = attrKey(node);
@@ -791,6 +888,7 @@ function PolicyNode({
             category={category}
             attr={key}
             highlight={hot}
+            lang={lang}
           />
         )}
         {node.structured_ref && (
@@ -804,6 +902,7 @@ function PolicyNode({
             depth={depth + 1}
             highlighted={highlighted}
             category={category}
+            lang={lang}
           />
         </div>
       ))}

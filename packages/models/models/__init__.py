@@ -7,10 +7,11 @@ from .providers import (
     get_mllm,
     get_policy_llm,
     get_text_embedder,
+    get_translation_llm,
 )
 
 __all__ = [
     "base_config", "profile", "role_spec",
     "get_agent_llm", "get_asr", "get_image_embedder", "get_mllm",
-    "get_policy_llm", "get_text_embedder",
+    "get_policy_llm", "get_text_embedder", "get_translation_llm",
 ]

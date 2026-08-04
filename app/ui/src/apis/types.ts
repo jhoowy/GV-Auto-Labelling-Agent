@@ -152,6 +152,28 @@ export interface TrackedSegment {
   score: number;
 }
 
+// Presentation-only Korean translation of a node's human-readable strings,
+// stored under structured_data.i18n.ko mirroring the English field structure
+// (#22). English stays authoritative; the UI falls back to English per-field
+// when a Korean string is absent. `_src_version` caches the node version it was
+// translated from. Loosely typed — the UI reads it defensively.
+export interface PolicyI18nKo {
+  _src_version?: number;
+  guidelines?: string;
+  values?: Record<string, { label?: string; description?: string; rules?: string[] }>;
+  rules?: { note?: string }[]; // index-aligned to decision_tree rules
+  default_note?: string;
+}
+
+// Summary returned by POST /api/policies/{category}/translate.
+export interface TranslateSummary {
+  category: string;
+  translated: string[];
+  skipped: string[];
+  n_translated: number;
+  n_skipped: number;
+}
+
 export interface PolicySet {
   version: number;
   policy_versions: Record<string, number>; // policy_id -> version
