@@ -151,6 +151,31 @@ def upsert_policy(policy: Policy) -> Policy:
         return _to_schema(obj)
 
 
+def update_structured_data(policy_id: str, structured_data: dict) -> Policy:
+    """In-place update of a node's `structured_data` JSONB, WITHOUT bumping the
+    version, recomputing the embedding, or appending history.
+
+    For presentation-only payloads (e.g. the `i18n` Korean rendering, #22) that
+    must not create a new policy version — the English source text and its
+    version are unchanged. The current-version history snapshot is kept in sync
+    (JSONB field update, no new row) so `resolve_policy` round-trips the payload.
+    """
+    with SessionLocal() as s:
+        obj = s.get(m.Policy, policy_id)
+        if obj is None:
+            raise KeyError(f"policy '{policy_id}' not found")
+        obj.structured_data = structured_data
+        hist = (
+            s.query(m.PolicyVersion)
+            .filter_by(policy_id=policy_id, version=obj.version)
+            .first()
+        )
+        if hist is not None:
+            hist.structured_data = structured_data
+        s.commit()
+        return _to_schema(obj)
+
+
 def upsert_structured_attribute(
     category: str,
     name: str,

@@ -31,6 +31,10 @@ policy_llm:         # data-independent policy authoring (OpenAI chat/completions
   provider: openai    # needs OPENAI_API_KEY in the environment
   model: gpt-5.6-sol  # reasoning model; no custom temperature
 
+translation_llm:    # presentation-only Korean rendering of policy nodes (#22)
+  provider: openai    # needs OPENAI_API_KEY; optional role -> code default gpt-5-mini
+  model: gpt-5-mini   # reasoning model; no custom temperature. English stays authoritative
+
 text_embedding:     # ASR + summary -> segment & global text embedding
   provider: vllm      # -> QwenTextEmbedder; emits Vector(2560), matches db/models.py
   model_path: /path/to/Qwen3-Embedding-4B
