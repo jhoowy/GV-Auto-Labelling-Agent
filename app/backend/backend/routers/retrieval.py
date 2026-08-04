@@ -1,10 +1,10 @@
 """Retrieval / RAG skill endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from tools import retrieval
+from tools import retrieval, storage
 
 router = APIRouter(prefix="/api/search", tags=["retrieval"])
 
@@ -27,8 +27,12 @@ def search_policies(q: PolicyQuery):
 
 @router.post("/segments")
 def search_segments(segment_id: str):
-    """Precedent retrieval + confirmed labels."""
-    raise NotImplementedError
+    """Precedent retrieval: nearest segments + their confirmed labels."""
+    seg = storage.get_segment(segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown segment {segment_id}")
+    results = retrieval.find_similar_segments(seg)
+    return [{"segment": s, "labels": labels} for s, labels in results]
 
 
 @router.post("/qa")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from tools import policy_store
+from tools import db_browser, policy_store
 
 router = APIRouter(prefix="/api", tags=["policy"])
 
@@ -11,6 +11,12 @@ router = APIRouter(prefix="/api", tags=["policy"])
 @router.get("/policies")
 def get_policy_tree(category: str):
     return policy_store.get_policy_tree(category)
+
+
+@router.get("/policy-sets")
+def list_policy_sets():
+    """Policy-set snapshots, newest version first."""
+    return db_browser.list_policy_sets()
 
 
 @router.post("/policy-sets")
