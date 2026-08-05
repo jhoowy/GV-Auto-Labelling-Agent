@@ -12,6 +12,7 @@ was active when it was tagged.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
@@ -311,6 +312,99 @@ def upsert_decision_rule(
     ))
 
 
+# --- decision-tree node ops (pure) ----------------------------------------
+
+def _coerce_int(x) -> int | None:
+    """Int from an int/float/numeric-string; bools and non-numerics -> None."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        return int(x)
+    if isinstance(x, str):
+        try:
+            return int(x.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _well_formed_when(when) -> bool:
+    """A `when` clause is a non-empty list of {attribute, op, ...} condition dicts
+    (mirrors the format `_apply_decision_tree` consumes)."""
+    if not isinstance(when, list) or not when:
+        return False
+    return all(isinstance(c, dict) and c.get("attribute") and c.get("op")
+               for c in when)
+
+
+def _build_rule(op: dict) -> dict:
+    """Materialise the rule dict from an op's fields, in the stored tree format
+    (`{"when":[...], "score": int, "note": str}`)."""
+    return {"when": list(op["when"]), "score": _coerce_int(op["score"]),
+            "note": str(op.get("note") or "")}
+
+
+def apply_tree_op(rules: list, default: int, op: dict) -> tuple[list, int]:
+    """Apply ONE decision-tree NODE op to a rules list — the only mutations the
+    post-bootstrap agent may request.
+
+    `op` = {"op": "add"|"modify"|"delete", "rule_index": int|None,
+            "when": [...], "score": int, "note": str}. `add` inserts a new rule
+    (at `rule_index`, or appended when None); `modify` replaces the rule at
+    `rule_index`; `delete` removes it. Returns `(new_rules, default)`; `default`
+    is always preserved. An invalid op (unknown kind, malformed `when`, missing
+    score, out-of-bounds `rule_index`) is a no-op — the inputs are returned
+    unchanged so an invalid request never mutates the tree."""
+    rules = list(rules or [])
+    if not isinstance(op, dict):
+        return rules, default
+    kind = op.get("op")
+
+    ri = op.get("rule_index")
+    if isinstance(ri, bool):
+        return rules, default
+    if isinstance(ri, float):
+        ri = int(ri)
+    if ri is not None and not isinstance(ri, int):
+        return rules, default
+
+    if kind == "add":
+        if not _well_formed_when(op.get("when")) or _coerce_int(op.get("score")) is None:
+            return rules, default
+        rule = _build_rule(op)
+        if ri is None:
+            rules.append(rule)
+        elif 0 <= ri <= len(rules):  # insert allows the tail position
+            rules.insert(ri, rule)
+        return rules, default
+
+    if kind == "modify":
+        if ri is None or not 0 <= ri < len(rules):
+            return rules, default
+        if not _well_formed_when(op.get("when")) or _coerce_int(op.get("score")) is None:
+            return rules, default
+        rules[ri] = _build_rule(op)
+        return rules, default
+
+    if kind == "delete":
+        if ri is not None and 0 <= ri < len(rules):
+            del rules[ri]
+        return rules, default
+
+    return rules, default
+
+
+def _current_decision_tree(category: str) -> tuple[list, int]:
+    """Current `{category}.rules` node's (rules, default); ([], 0) if none yet."""
+    for p in get_policy_tree(category):
+        if p.policy_id == f"{category}.rules":
+            sd = p.structured_data or {}
+            return list(sd.get("rules") or []), int(sd.get("default", 0))
+    return [], 0
+
+
 def snapshot_policy_set(note: str | None = None) -> PolicySet:
     """Tag the whole active tree as policy-set vN.
 
@@ -418,6 +512,12 @@ def _materialise_request(req_id: str) -> Policy | None:
     except ValueError:
         log.warning("request %s has unknown category %r; not materialised", req_id, cat)
         return None
+
+    # Decision-tree node op (post-bootstrap agent path): `proposed_change` carries
+    # the JSON op; apply it to the `{cat}.rules` node and re-save (versioned).
+    if node_type == "decision_rule":
+        return _materialise_decision_rule(cat, proposed, req_id)
+
     ptype = PolicyType.ATTRIBUTE if node_type == "attribute" else PolicyType.EDGE_CASE
     text = proposed if not rationale else f"{proposed}\n\nRationale: {rationale}"
     node = upsert_policy(Policy(
@@ -426,4 +526,33 @@ def _materialise_request(req_id: str) -> Policy | None:
         parent_id=f"{cat}.scoring", text=text,
     ))
     log.info("materialised %s node %s from request %s", node_type, node.policy_id, req_id)
+    return node
+
+
+def _materialise_decision_rule(category: str, op_json: str, req_id: str) -> Policy | None:
+    """Apply a queued decision-tree node op to the `{category}.rules` node.
+
+    Parses the op JSON (carried in `proposed_change`), applies it to the current
+    rules via `apply_tree_op`, and re-saves through `upsert_decision_rule` (which
+    versions the node and preserves the storage format). `default` is preserved.
+    A malformed/invalid op leaves the tree unchanged and is logged."""
+    try:
+        op = json.loads(op_json) if isinstance(op_json, str) else op_json
+    except (TypeError, ValueError):
+        log.warning("request %s: decision_rule op is not valid JSON; tree unchanged", req_id)
+        return None
+    if not isinstance(op, dict):
+        log.warning("request %s: decision_rule op is not an object; tree unchanged", req_id)
+        return None
+
+    rules, default = _current_decision_tree(category)
+    new_rules, new_default = apply_tree_op(rules, default, op)
+    if new_rules == rules and new_default == default:
+        # apply_tree_op no-ops an invalid/out-of-bounds op -> nothing to version.
+        log.warning("request %s: decision_rule op %r made no change; tree unchanged",
+                    req_id, op.get("op"))
+        return None
+    node = upsert_decision_rule(category, new_rules, new_default)
+    log.info("materialised decision_rule op %r on %s from request %s",
+             op.get("op"), node.policy_id, req_id)
     return node

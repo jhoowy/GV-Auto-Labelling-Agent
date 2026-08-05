@@ -99,14 +99,25 @@ _SELECT_SYS = (
 _REVIEW_SYS = (
     "You are a content-moderation reviewer for gameplay videos. For the TARGET "
     "SHOT you are given, per category, a score that was computed "
-    "DETERMINISTICALLY from a decision tree over the extracted attributes, plus "
-    "the decision trajectory (which attributes were selected, their extracted "
-    "values, and which rule fired). Judge whether the score and trajectory are "
-    "appropriate for the shot. You CANNOT change the score. If the score looks "
-    "wrong, or the tree failed to capture the shot's relevant content, set "
-    "needs_change=true and describe in change_note what the decision tree should "
-    "do differently; otherwise needs_change=false. Return ONLY JSON of the form "
-    '{"reviews":[{"category":str,"needs_change":bool,"change_note":str}]}.'
+    "DETERMINISTICALLY from a decision tree over the extracted attributes, the "
+    "category's current priority-ordered rules (indexed from 0), and the decision "
+    "trajectory (which attributes were selected, their extracted values, and "
+    "which rule index fired). Judge whether the score and trajectory are "
+    "appropriate for the shot. You CANNOT change the score. If the tree is wrong, "
+    "the ONLY changes you may request are decision-tree NODE operations on the "
+    "rules: ADD a rule, MODIFY a rule, or DELETE a rule. You may NOT touch "
+    "attribute definitions or the rubric. When a change is warranted set "
+    "needs_change=true and propose EXACTLY ONE op in `op`; otherwise "
+    "needs_change=false and omit `op`. `op.op` is \"add\" | \"modify\" | "
+    "\"delete\". For add: give `when` (a non-empty list of "
+    "{attribute, op, value} conditions over the category's attributes), an "
+    "integer `score` 0-5, and a short `note`; set `rule_index` to the position to "
+    "insert at, or null to append. For modify: give `rule_index` (the rule to "
+    "replace) plus the new `when`, `score`, and `note`. For delete: give only "
+    "`rule_index`. Return ONLY JSON of the form "
+    '{"reviews":[{"category":str,"needs_change":bool,"change_note":str,'
+    '"op":{"op":str,"rule_index":int|null,'
+    '"when":[{"attribute":str,"op":str,"value":<any>}],"score":int,"note":str}}]}.'
 )
 
 
@@ -327,6 +338,7 @@ def _select_prompt(state, seg, asr, names_by_cat: dict[str, list]) -> str:
 def _review_prompt(state, seg, asr, items: list[dict]) -> str:
     block = "\n".join(
         f"- {it['category']}: score={it['score']}\n"
+        f"    rules: {json.dumps(it.get('rules', []), ensure_ascii=False)}\n"
         f"    trajectory: {json.dumps(it['trajectory'], ensure_ascii=False)}"
         for it in items
     ) or "none"
@@ -363,10 +375,36 @@ def _parse_selections(parsed: dict, attr_cats: list[str],
     return sel
 
 
+def _clean_tree_op(raw, category: str) -> dict | None:
+    """Normalise a reviewer-proposed decision-tree op into the constrained
+    payload {"op","category","rule_index","when"?,"score"?,"note"?}. Only the
+    three node ops (add|modify|delete) survive; `category` is set authoritatively
+    from the loop (never trusted from the model). Malformed -> None. Bounds/
+    well-formedness are enforced later by `policy_store.apply_tree_op`."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("op")
+    if kind not in ("add", "modify", "delete"):
+        return None
+    op: dict = {"op": kind, "category": category}
+    ri = raw.get("rule_index")
+    op["rule_index"] = (int(ri) if isinstance(ri, (int, float))
+                        and not isinstance(ri, bool) else None)
+    if isinstance(raw.get("when"), list):
+        op["when"] = raw["when"]
+    if raw.get("score") is not None:
+        op["score"] = raw["score"]
+    if raw.get("note") is not None:
+        op["note"] = str(raw["note"])
+    return op
+
+
 def _parse_reviews(parsed: dict, attr_cats: list[str]) -> dict[str, dict]:
-    """Lenient parse of the REVIEW call into {category: {needs_change, change_note}}.
-    Only known categories are kept; the review never carries a score (REVIEW
-    cannot override the deterministic decision-tree score)."""
+    """Lenient parse of the REVIEW call into
+    {category: {needs_change, change_note, op}}. Only known categories are kept;
+    the review never carries a score (REVIEW cannot override the deterministic
+    decision-tree score). When needs_change is set, `op` is the ONE constrained
+    decision-tree node op the reviewer requested (add|modify|delete), else None."""
     out: dict[str, dict] = {}
     for item in parsed.get("reviews") or []:
         if not isinstance(item, dict):
@@ -374,8 +412,10 @@ def _parse_reviews(parsed: dict, attr_cats: list[str]) -> dict[str, dict]:
         cat = item.get("category")
         if cat not in attr_cats:
             continue
-        out[cat] = {"needs_change": bool(item.get("needs_change")),
-                    "change_note": str(item.get("change_note") or "")}
+        needs = bool(item.get("needs_change"))
+        out[cat] = {"needs_change": needs,
+                    "change_note": str(item.get("change_note") or ""),
+                    "op": _clean_tree_op(item.get("op"), cat) if needs else None}
     return out
 
 
@@ -664,8 +704,10 @@ def _judge_pipeline(orch, state, seg, asr, frames, attr_cats, cat_defs, cat_rule
         }
 
     # 4. REVIEW — one call across the categories; the model judges appropriateness
-    # but CANNOT change the deterministic score. needs_change -> rule-change.
-    items = [{"category": c, "score": scores[c], "trajectory": trajectories[c]}
+    # but CANNOT change the deterministic score. The only change it may request is
+    # a decision-tree NODE op (add|modify|delete a rule) on the current rules.
+    items = [{"category": c, "score": scores[c], "trajectory": trajectories[c],
+              "rules": (cat_rule[c].structured_data or {}).get("rules") or []}
              for c in attr_cats]
     rev_parsed = _parse_json(orch.judge(
         _REVIEW_SYS, _review_prompt(state, seg, asr, items), frames))
@@ -681,16 +723,17 @@ def _judge_pipeline(orch, state, seg, asr, frames, attr_cats, cat_defs, cat_rule
             cat_defs[cat], cat_rule[cat], idx[cat], selected[cat],
             extracted_by_cat[cat]))
         rv = reviews.get(cat)
-        if rv and rv["needs_change"]:
+        # Post-bootstrap the reviewer may ONLY request a decision-tree node op;
+        # a flag without a well-formed op is dropped (no free-text edits queued).
+        if rv and rv["needs_change"] and rv.get("op"):
             note = rv["change_note"]
             proposals.append({"rule_change": {
                 "category": cat, "target_policy_id": cat_rule[cat].policy_id,
-                "segment_id": seg.segment_id,
-                "change": (f"Adjust the {cat} decision tree: {note}" if note
-                           else f"Adjust the {cat} decision tree to fit this shot."),
+                "segment_id": seg.segment_id, "op": rv["op"],
                 "rationale": (f"Reviewer flagged shot {seg.segment_id} score "
                               f"{scores[cat]} as inappropriate for the extracted "
-                              f"attributes {trajectories[cat]['extracted']}."),
+                              f"attributes {trajectories[cat]['extracted']}."
+                              + (f" Note: {note}" if note else "")),
             }})
     return labels, proposals
 
@@ -868,11 +911,14 @@ def _side_fx(state: LabellingState) -> dict:
     dispatched by shape: attribute-driven JUDGE enqueues rule-change requests,
     bootstrap enqueues free-text gaps and drafts structured attributes."""
     for p in state.get("proposals", []) or []:
-        # Rule-change request from the attribute-driven tree (never auto-applied).
+        # Decision-tree node-op request from the attribute-driven tree (never
+        # auto-applied). The structured op is serialised into `proposed_change`;
+        # the approver materialises it onto the `{cat}.rules` node.
         rc = p.get("rule_change")
         if rc:
             agent_tools.propose_policy_change(
-                change=rc["change"], rationale=rc["rationale"],
+                change=json.dumps(rc["op"], ensure_ascii=False),
+                rationale=rc["rationale"],
                 affected=[rc["segment_id"]] if rc.get("segment_id") else [],
                 category=rc.get("category"), node_type="decision_rule",
                 target_policy_id=rc.get("target_policy_id"))
