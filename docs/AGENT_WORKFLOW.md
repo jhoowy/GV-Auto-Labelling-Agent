@@ -97,7 +97,7 @@ flowchart TB
   Q -->|"no policy / bootstrap — holistic"| HD["derive structured signals<br/>(e.g. profanity via term-level word-list on ASR)"]
   HD --> HS["one multimodal scoring call for the N categories<br/>0..5 · rationale · cited pins · evidence"]
   HS --> CK{"compare vs precedents"}
-  CK -->|"divergent"| ISS["note precedent_divergence in the decision entry<br/>(no auto re-judge)"]
+  CK -->|"divergent"| ISS["note precedent divergence in the rationale<br/>(no auto re-judge)"]
 
   EXT -.->|"frames insufficient"| EXP["expand_frames → re-extract once"]
   HS -.->|"frames insufficient"| EXP
@@ -117,7 +117,8 @@ DECISION_RULE tree):
   A category with no selected attributes skips its EXTRACT call.
 - **DECIDE** — the tree is applied **deterministically** in the code (no LLM
   call) over only the extracted values → a `score` and a **trajectory**
-  (`{selected, extracted, rule_index, rule_note, score}`).
+  (`{selected, extracted, rule_index, rule_note, score}`) used in-process to
+  drive the REVIEW prompt, the rationale, and the score. It is **not** persisted.
 - **REVIEW** — one call across the categories, injecting each category's score +
   trajectory. The model judges appropriateness but **cannot change the score**; if
   it flags `needs_change`, JUDGE **queues a rule-change request** targeting that
@@ -127,12 +128,14 @@ DECISION_RULE tree):
   (`source=judge/extract`); unselected/empty ones are stored with an EMPTY value
   (`value=""`, `evidence=None`, `source=judge/unselected`) so "considered-and-empty"
   is distinguishable downstream. Cited pins = all attr-def nodes + the rule node;
-  the trajectory rides in `tool_trace`; rationale is the matched-rule note.
+  rationale is the matched-rule note. **No per-label `tool_trace` is stored** —
+  the fired rule is re-derived on demand from `evidence_attributes` (see
+  *Node → segment tracking* below).
 
 **Holistic fallback** (a category with no synthesised policy, and *every* category
 during bootstrap): a single multimodal call scores the categories directly from
 frames + summary + ASR, deriving any structured term-level signals first and
-noting precedent divergence in the decision entry.
+noting precedent divergence **in the rationale**.
 
 Structured output is **not** forced; the model returns JSON-ish text parsed
 leniently. Consistency divergences are **recorded**, not auto-corrected.
@@ -159,23 +162,38 @@ Persist each draft `Label` (`storage.save_label`) and update the rolling
 `carry_over` summary. Advance `cursor += window_stride`; loop to LOAD while
 `cursor < len(all_segments)`, else END.
 
+## Node → segment tracking
+
+A reviewer can click a policy node and see which segments were labelled through
+it (`tools.tracking`, read-only, nothing stored):
+- **attribute value → segments** (`segments_for_attribute_value`) — matches any
+  label whose `evidence_attributes` carries that key/value.
+- **decision-tree rule → segments** (`segments_for_rule`) — because labels store
+  **no** trace, the fired rule is **re-derived**: for each of the category's
+  labels, `values` is rebuilt from its non-empty `evidence_attributes`, the
+  category's **current** decision tree is re-applied via the shared, DB-free
+  `tools.decision_tree` module (the exact code the agent scored with), and the
+  segment is kept when the matched rule's index equals the requested one.
+
 ## Issues log
 
-Beyond the per-label rationale, the holistic route records **precedent_divergence**
-inside the label's compact `decision` entry when a score disagrees sharply with
-similar shots' confirmed labels — retained for a human manager to group and
-triage, never auto-corrected. (Broader capability gaps such as missing audio
-input are tracked as **repository issues**, not per-run trace notes.)
+Beyond the per-label rationale, the holistic route notes **precedent divergence**
+in the label's rationale when a score disagrees sharply with similar shots'
+confirmed labels — retained for a human manager to group and triage, never
+auto-corrected. (Broader capability gaps such as missing audio input are tracked
+as **repository issues**, not per-run trace notes.)
 
 ## Output contract
 
 Each judged shot yields `Label` rows (see `packages/schemas`): `category`,
 `score`, `rationale`, `cited_policy_ids`, `evidence_attributes`,
-`used_segment_ids`, `tool_trace`, `confidence`. A label's audit trail is its
+`used_segment_ids`, `confidence`. A label's audit trail is its
 **evidence_attributes** (extracted attributes with evidence + the attribute
 node's version), its **cited_policy_ids** as canonical `(policy_id, version)` pins
 (attribute-def nodes + the rule node, hallucinated ids dropped and true versions
-re-attached), and the matched-rule note carried in the rationale. `tool_trace`
-keeps only a single compact `{"decision": …}` entry — the old verbose per-stage /
-per-tool dump was removed. Those pins resolve through the `policy_versions`
-history to the exact text used, making every label reproducible and auditable.
+re-attached), and the matched-rule note carried in the **rationale**. Labels
+carry **no per-label `tool_trace`** (the column is kept but stored empty `[]`);
+the fired decision-tree rule is re-derived from `evidence_attributes` when
+needed (Node → segment tracking). Those pins resolve through the
+`policy_versions` history to the exact text used, making every label
+reproducible and auditable.

@@ -1,21 +1,24 @@
 """Node -> segment tracking (derived from existing labels; read-only).
 
-Aggregates the JUDGE's per-label decision trace back into the policy nodes that
-drove it, so a reviewer can click a decision-tree rule or an attribute value and
-see which segments were labelled through it. Nothing is stored: both queries
-read `labels` (+ join `segments` for the video id).
+Aggregates each label back into the policy nodes that drove it, so a reviewer
+can click a decision-tree rule or an attribute value and see which segments were
+labelled through it. Nothing is stored: both queries read `labels` (+ join
+`segments` for the video id).
 
-Trace shape (written by labelling/graph.py):
-  - tool_trace = [{"decision": {"selected", "extracted", "rule_index",
-    "rule_note", "score"}}]  -> rule_index picks the fired decision-tree rule.
-  - evidence_attributes = one entry per defined attribute; a selected attribute
-    carries its extracted `value`, unselected ones store value == "".
+Labels carry NO per-label tool_trace. The signal both queries use is
+`evidence_attributes` — one entry per defined attribute; a selected attribute
+carries its extracted `value`, unselected ones store value == "". For the
+rule -> segment map (`segments_for_rule`) the fired rule is RE-DERIVED by
+re-applying the category's current decision tree to those evidence values via
+the shared `tools.decision_tree` module (same code the agent scored with).
 """
 from __future__ import annotations
 
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from . import decision_tree, policy_store
 
 # Aggregators cap their result set; a full page equal to the cap signals the
 # caller (endpoint/UI) that more matches may exist.
@@ -27,28 +30,74 @@ def _seg_row(segment_id: str, video_id: str, score: int) -> dict:
     return {"segment_id": segment_id, "video_id": video_id, "score": score}
 
 
+def _category_tree(category: str) -> tuple[list, int, dict] | None:
+    """Load `category`'s current decision tree + ordinal order map from the live
+    policy tree. Returns (rules, default, order) or None if no `{cat}.rules` node
+    exists. `order` maps each ordinal attribute name -> ascending value keys, built
+    from the attribute-def nodes exactly as `graph._attr_index` does, so `>=`/`<=`
+    rules re-derive identically."""
+    rules: list | None = None
+    default = 0
+    order: dict[str, list] = {}
+    for node in policy_store.get_policy_tree(category):
+        sd = node.structured_data or {}
+        kind = sd.get("kind")
+        if kind == "decision_tree" and node.policy_id == f"{category}.rules":
+            rules = sd.get("rules") or []
+            default = sd.get("default", 0)
+        elif kind == "attribute_def" and sd.get("value_type") == "ordinal":
+            name = (node.policy_id.split(".attr.", 1)[1]
+                    if ".attr." in node.policy_id else node.policy_id)
+            vals = sd.get("values") or []
+            keys = [v.get("value") if isinstance(v, dict) else v for v in vals]
+            if keys:
+                order[name] = keys  # ascending -> lets rules compare with >=
+    if rules is None:
+        return None
+    return rules, default, order
+
+
 def segments_for_rule(category: str, rule_index: int) -> list[dict]:
-    """Segments whose label trajectory fired decision-tree rule `rule_index`
-    for `category`. Compared as text on tool_trace[0].decision.rule_index so a
-    null (no rule matched) never coerces. Capped at RESULT_CAP, ordered by id."""
+    """Segments whose label fired decision-tree rule `rule_index` for `category`.
+
+    No trace is stored, so the fired rule is re-derived: for each label, build
+    `values` from its non-empty `evidence_attributes`, re-apply the category's
+    CURRENT decision tree (`tools.decision_tree._apply_decision_tree`), and keep
+    the segment when the matched rule's index == `rule_index`. Done in Python
+    over the labels (counts are modest). Capped at RESULT_CAP, ordered by id."""
+    tree = _category_tree(category)
+    if tree is None:
+        return []
+    rules, default, order = tree
+
     sql = text(
         """
         SELECT l.segment_id AS segment_id, s.video_id AS video_id,
-               l.score AS score
+               l.score AS score, l.evidence_attributes AS evidence
         FROM labels l
         JOIN segments s ON s.segment_id = l.segment_id
         WHERE l.category = :category
-          AND (l.tool_trace #>> '{0,decision,rule_index}') = :rule_index
         ORDER BY l.label_id
-        LIMIT :cap
         """
     )
+    out: list[dict] = []
     with SessionLocal() as sess:
-        rows = sess.execute(
-            sql,
-            {"category": category, "rule_index": str(rule_index), "cap": RESULT_CAP},
-        ).mappings()
-        return [_seg_row(r["segment_id"], r["video_id"], r["score"]) for r in rows]
+        rows = sess.execute(sql, {"category": category}).mappings()
+        for r in rows:
+            values = {
+                a.get("key"): a.get("value")
+                for a in (r["evidence"] or [])
+                if isinstance(a, dict) and a.get("key") and a.get("value") != ""
+            }
+            _score, matched = decision_tree._apply_decision_tree(
+                rules, default, values, order)
+            if matched is None:
+                continue  # no rule fired -> not attributable to any rule_index
+            if rules.index(matched) == rule_index:
+                out.append(_seg_row(r["segment_id"], r["video_id"], r["score"]))
+                if len(out) >= RESULT_CAP:
+                    break
+    return out
 
 
 def segments_for_attribute_value(
