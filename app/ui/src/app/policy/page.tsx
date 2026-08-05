@@ -199,6 +199,27 @@ function ruleAttrs(rule: any): string[] {
   return conds.map((c) => String(c?.attribute)).filter(Boolean);
 }
 
+// A single condition rendered as `attr op value` (op omitted for `present`).
+function fmtCond(c: any): string {
+  const op = OP_LABEL[c?.op] ?? String(c?.op ?? "");
+  const head = `${String(c?.attribute ?? "?")} ${op}`;
+  return c?.op === "present" ? head : `${head} ${fmtValue(c?.value)}`;
+}
+
+// Compact one-line summary of a rule's conditions — the node fallback when a
+// rule has no human `description`, and the sub-label under the reveal.
+function condSummary(rule: any): string {
+  const conds: any[] = Array.isArray(rule?.when) ? rule.when : [];
+  if (conds.length === 0) return "always";
+  return conds.map(fmtCond).join("; ");
+}
+
+// The rule node's primary text: its human sentence (KO when active + present),
+// else a compact condition summary so a node always shows something (#55).
+function ruleText(lang: Lang, rule: any): string {
+  return tr(lang, rule?.description_ko, rule?.description) || condSummary(rule);
+}
+
 // Mirrors the aggregator cap (tools/tracking.RESULT_CAP): a full page means
 // there may be more matches than shown.
 const TRACK_CAP = 200;
@@ -382,13 +403,6 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
                 })}
               </div>
             )}
-            {/* The vertical decision-tree cascade stays below the schema list. */}
-            <DecisionTreeDiagram
-              node={decisionNode}
-              selected={selectedRule}
-              onSelect={onSelectRule}
-              lang={lang}
-            />
           </div>
           <div className="attr-md-right">
             <AttributeDetail
@@ -399,19 +413,75 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
               onTrackValue={onTrackValue}
               onClearValue={() => setTrackValue(null)}
             />
-            {/* Selecting a rule lists the segments it labelled, in the same panel. */}
-            {selectedRule != null && (
+          </div>
+        </div>
+
+        {/* ── Decision rule tree: its OWN full-width section, so the cascade no
+            longer cramps the attribute list. Clicking a rule node reveals its
+            conditions here AND drives the attribute highlight + #14 tracking. */}
+        <div className="dt-section">
+          <DecisionTreeDiagram
+            node={decisionNode}
+            rules={rules}
+            selected={selectedRule}
+            onSelect={onSelectRule}
+            lang={lang}
+          />
+          {selectedRule != null && rules[selectedRule] && (
+            <div className="dt-reveal">
+              <RuleConditions rule={rules[selectedRule]} index={selectedRule} lang={lang} />
+              {/* #14: the segments this rule labelled, alongside its conditions. */}
               <SegmentTrackPanel
                 key={`${category}-rule-${selectedRule}`}
                 title={`Segments labelled via rule #${selectedRule + 1}`}
                 fetcher={() => getRuleSegments(category, selectedRule)}
                 onClose={() => setSelectedRule(null)}
               />
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </AsyncState>
     </section>
+  );
+}
+
+// Reveal panel for a clicked rule node: its full `when` conditions (attribute ·
+// op · value) + resulting score. Mirrors dt-labeling's policy-edit reveal; the
+// description shown on the node is expanded here into the exact predicate list.
+function RuleConditions({
+  rule,
+  index,
+  lang,
+}: {
+  rule: any;
+  index: number;
+  lang: Lang;
+}) {
+  const conds: any[] = Array.isArray(rule?.when) ? rule.when : [];
+  const desc = tr(lang, rule?.description_ko, rule?.description);
+  return (
+    <div className="card dt-reveal-card">
+      <div className="row spread">
+        <strong className="small">Rule #{index + 1} conditions</strong>
+        <ScoreBadge score={Number(rule?.score ?? 0)} />
+      </div>
+      {desc && <p className="small" style={{ margin: "6px 0 0" }}>{desc}</p>}
+      {conds.length === 0 ? (
+        <div className="muted small" style={{ marginTop: 6 }}>
+          Always matches (no conditions).
+        </div>
+      ) : (
+        <ul className="dt-reveal-conds">
+          {conds.map((c, i) => (
+            <li key={i} className="dt-cond">
+              <span className="dt-attr">{String(c?.attribute ?? "?")}</span>{" "}
+              <span className="dt-op">{OP_LABEL[c?.op] ?? String(c?.op ?? "")}</span>
+              {c?.op !== "present" && <span className="dt-val"> {fmtValue(c?.value)}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -743,9 +813,10 @@ const DT = {
   LEAF_H: 66,
 };
 
-function ruleHeight(rule: any): number {
-  const n = Array.isArray(rule?.when) ? rule.when.length : 0;
-  return Math.max(64, 34 + Math.max(1, n) * 22 + 12);
+// Node height from its wrapped description text (~46 chars/line at RULE_W).
+function ruleHeight(text: string): number {
+  const lines = Math.max(1, Math.ceil((text.length || 1) / 46));
+  return Math.max(64, 30 + lines * 18 + 12);
 }
 
 const vPath = (x1: number, y1: number, x2: number, y2: number) => {
@@ -815,12 +886,16 @@ function LeafNode({
   );
 }
 
+// A rule node shows a short DESCRIPTION as its primary text (not the raw
+// conditions) — the exact `when` predicates are revealed on click (#55). `text`
+// is the description (or its condition-summary fallback), resolved by caller.
 function RuleNode({
   x,
   y,
   h,
   index,
   rule,
+  text,
   selected,
   onClick,
 }: {
@@ -829,10 +904,10 @@ function RuleNode({
   h: number;
   index: number;
   rule: any;
+  text: string;
   selected: boolean;
   onClick: () => void;
 }) {
-  const conds: any[] = Array.isArray(rule?.when) ? rule.when : [];
   return (
     <g className={`dt-node${selected ? " selected" : ""}`} onClick={onClick}>
       <rect
@@ -849,19 +924,7 @@ function RuleNode({
             <span>Rule #{index + 1}</span>
             <span className="dt-rulescore">→ score {String(rule?.score ?? "—")}</span>
           </div>
-          {conds.length === 0 ? (
-            <div className="dt-cond muted">always</div>
-          ) : (
-            conds.map((c, i) => (
-              <div className="dt-cond" key={i}>
-                <span className="dt-attr">{String(c?.attribute ?? "?")}</span>{" "}
-                <span className="dt-op">{OP_LABEL[c?.op] ?? String(c?.op ?? "")}</span>
-                {c?.op !== "present" && (
-                  <span className="dt-val"> {fmtValue(c?.value)}</span>
-                )}
-              </div>
-            ))
-          )}
+          <div className="dt-desc">{text}</div>
         </div>
       </foreignObject>
     </g>
@@ -870,18 +933,19 @@ function RuleNode({
 
 function DecisionTreeDiagram({
   node,
+  rules,
   selected,
   onSelect,
   lang,
 }: {
   node: Policy | null;
+  rules: any[];
   selected: number | null;
   onSelect: (i: number) => void;
   lang: Lang;
 }) {
   const sd = node?.structured_data;
   if (!node || !sd || sd.kind !== "decision_tree") return null;
-  const rules: any[] = Array.isArray(sd.rules) ? sd.rules : [];
   const def = Number(sd.default ?? 0);
   // Korean rule-note overrides (index-aligned to `rules`); notes only.
   const ko = koOf(sd);
@@ -889,14 +953,17 @@ function DecisionTreeDiagram({
     ? ko.rules
     : [];
 
+  // Each node's primary text: description (KO-aware) or condition-summary fallback.
+  const texts = rules.map((r) => ruleText(lang, r));
+
   const ruleX = DT.MARGIN;
   const leafX = ruleX + DT.RULE_W + DT.COL_GAP;
 
   // Vertical layout: rule nodes stack in the left column, match-leaves sit to
   // their right, and the else-chain flows straight down to the default leaf.
   let y = DT.MARGIN;
-  const pos = rules.map((r) => {
-    const h = ruleHeight(r);
+  const pos = rules.map((_, i) => {
+    const h = ruleHeight(texts[i]);
     const p = { y, h };
     y += Math.max(h, DT.LEAF_H) + DT.V_GAP;
     return p;
@@ -996,6 +1063,7 @@ function DecisionTreeDiagram({
                 h={p.h}
                 index={i}
                 rule={rules[i]}
+                text={texts[i]}
                 selected={selected === i}
                 onClick={() => onSelect(i)}
               />
@@ -1004,8 +1072,9 @@ function DecisionTreeDiagram({
         )}
       </div>
       <div className="muted small" style={{ marginTop: 6 }}>
-        Click a rule node to highlight the attribute cards its conditions read
-        and list the segments it labelled.
+        Nodes show a short description — click a rule node to reveal its exact
+        conditions, highlight the attributes it reads, and list the segments it
+        labelled.
       </div>
     </div>
   );

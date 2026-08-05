@@ -116,6 +116,11 @@ export interface DecisionRule {
   when: DecisionRuleCond[];
   score: number;
   note?: string;
+  // Short human sentence shown as the rule node's primary text (#55). EN is
+  // authoritative; description_ko is the Korean rendering. Both optional — a
+  // companion change populates them; the UI falls back to a condition summary.
+  description?: string;
+  description_ko?: string;
 }
 export interface DecisionTree {
   kind: "decision_tree";
