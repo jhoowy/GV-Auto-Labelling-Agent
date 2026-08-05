@@ -81,13 +81,17 @@ def test_selections_dedupe_and_empty_parsed():
 
 def test_reviews_keeps_known_flags_and_notes():
     parsed = {"reviews": [
-        {"category": "sex", "needs_change": True, "change_note": "too low"},
+        {"category": "sex", "needs_change": True, "change_note": "too low",
+         "op": {"op": "delete", "rule_index": 0}},
         {"category": "gambling", "needs_change": False},
         {"category": "violence", "needs_change": True},   # unknown cat dropped
     ]}
     out = _parse_reviews(parsed, ["sex", "gambling"])
-    assert out["sex"] == {"needs_change": True, "change_note": "too low"}
-    assert out["gambling"] == {"needs_change": False, "change_note": ""}
+    # a flagged review carries the constrained node op (category set authoritatively)
+    assert out["sex"] == {"needs_change": True, "change_note": "too low",
+                          "op": {"op": "delete", "category": "sex", "rule_index": 0}}
+    # not-flagged -> no op
+    assert out["gambling"] == {"needs_change": False, "change_note": "", "op": None}
     assert "violence" not in out
 
 

@@ -10,7 +10,18 @@ evict any half-resolved ``db`` module before the test modules import anything.
 import sys
 from pathlib import Path
 
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+_WT_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = str(_WT_ROOT)
 
 sys.path[:] = [p for p in sys.path if p not in ("", ".", _REPO_ROOT)]
+
+# The shared editable install points at a DIFFERENT checkout, so make THIS
+# worktree's own source roots authoritative for the packages under test —
+# otherwise `import labelling` / `import tools` resolve to the installed tree,
+# not the code being validated here. (Unchanged packages — db, schemas, models,
+# … — keep resolving via the editable finder.)
+for _root in (_WT_ROOT / "packages" / "tools", _WT_ROOT / "labelling"):
+    _sp = str(_root)
+    if _sp not in sys.path:
+        sys.path.insert(0, _sp)
 sys.modules.pop("db", None)
