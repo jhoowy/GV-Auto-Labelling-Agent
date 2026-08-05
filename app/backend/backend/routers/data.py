@@ -15,12 +15,20 @@ def list_videos(
     page: int = 1,
     page_size: int = 24,
     dataset: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    score_min: int | None = None,
+    score_max: int | None = None,
 ):
     """Paginated video gallery: title/duration/status/thumbnail + segment count.
     Case-insensitive title substring search via `search`; optional `dataset`
-    filters on metadata_json->>'dataset'."""
+    filters on metadata_json->>'dataset'. `status` filters on the labelling
+    lifecycle (ingested/labelled/unlabelled); `category` + `score_min`/`score_max`
+    keep videos with a matching label in that score range."""
     return storage.list_videos_page(
-        search=search, page=page, page_size=page_size, dataset=dataset
+        search=search, page=page, page_size=page_size, dataset=dataset,
+        status=status, category=category,
+        score_min=score_min, score_max=score_max,
     )
 
 

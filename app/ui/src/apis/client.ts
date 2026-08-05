@@ -59,6 +59,10 @@ export const listVideos = (params: {
   page?: number;
   page_size?: number;
   dataset?: string;
+  status?: string;
+  category?: string;
+  score_min?: number;
+  score_max?: number;
 } = {}) =>
   api<Paginated<VideoListItem>>(
     `/api/videos${qs({
@@ -66,6 +70,10 @@ export const listVideos = (params: {
       page: params.page,
       page_size: params.page_size,
       dataset: params.dataset,
+      status: params.status,
+      category: params.category,
+      score_min: params.score_min,
+      score_max: params.score_max,
     })}`,
   );
 

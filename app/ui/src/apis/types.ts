@@ -23,6 +23,10 @@ export const CATEGORIES: string[] = ["gambling", "bad_language", "sex"];
 export const SCORE_MIN = 0;
 export const SCORE_MAX = 5;
 
+// Data Viewer lifecycle-status filter, derived from segments/labels existence
+// (distinct from the VideoStatus row column). "" = all.
+export type StatusFilter = "" | "ingested" | "labelled" | "unlabelled";
+
 export interface Attribute {
   key: string;
   value: string | number | boolean;
