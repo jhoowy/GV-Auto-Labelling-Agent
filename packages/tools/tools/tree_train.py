@@ -278,6 +278,18 @@ def train_decision_tree(category, video_ids=None) -> dict:
 
     log.info("tree_train: learned %d rule(s) for %s from %d row(s)",
              len(rules), cat, len(X))
+
+    # Best-effort: author human-readable EN + KO descriptions for the learned
+    # rules. A description failure (e.g. no OPENAI_API_KEY) must NEVER fail
+    # training, so the tree is kept as-is (undescribed) and `train_all` still
+    # works fully offline.
+    try:
+        from tools.tree_describe import describe_rules
+
+        describe_rules(cat)
+    except Exception as e:  # noqa: BLE001 - descriptions are best-effort
+        log.warning("tree_train: describe_rules failed for %s (%s); "
+                    "tree kept without descriptions", cat, e)
     return {"category": cat, "status": "trained", "n_rows": len(X),
             "n_rules": len(rules), "default": default,
             "attributes": feature_order}

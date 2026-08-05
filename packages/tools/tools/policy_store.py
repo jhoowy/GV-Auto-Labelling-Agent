@@ -286,29 +286,41 @@ def upsert_decision_rule(
     category: str,
     rules: list[dict],
     default: int = 0,
+    default_description: str | None = None,
+    default_description_ko: str | None = None,
 ) -> Policy:
     """Create/edit the category's DECISION_RULE node — a priority-ordered,
     attribute-based decision tree. The node id is deterministic
     (`<category>.rules`), parented under the scoring rubric. `rules` are
     evaluated in order; the first fully-matching rule's `score` wins, else
-    `default`. Reuses the versioned upsert path (bump + history)."""
+    `default`. Reuses the versioned upsert path (bump + history).
+
+    `default_description`/`_ko` are optional presentation-only EN/KO sentences for
+    the fallthrough (no-rule-matches) case; when given they are stored on the
+    node's structured_data alongside the rules (ignored by `_apply_decision_tree`).
+    Per-rule descriptions ride inside the rule dicts themselves (`tree_describe`)."""
     cat = getattr(category, "value", category)
     text = (
         f"Decision rule tree for {cat}: {len(rules)} priority-ordered rule(s) "
         f"over policy attributes; first fully-matching rule wins, else default "
         f"score {int(default)}. The rules live in structured_data."
     )
+    structured_data: dict = {
+        "kind": "decision_tree",
+        "default": int(default),
+        "rules": list(rules),
+    }
+    if default_description:
+        structured_data["default_description"] = default_description
+    if default_description_ko:
+        structured_data["default_description_ko"] = default_description_ko
     return upsert_policy(Policy(
         policy_id=f"{cat}.rules",
         type=PolicyType.DECISION_RULE,
         category=Category(cat),
         parent_id=f"{cat}.scoring",
         text=text,
-        structured_data={
-            "kind": "decision_tree",
-            "default": int(default),
-            "rules": list(rules),
-        },
+        structured_data=structured_data,
     ))
 
 
