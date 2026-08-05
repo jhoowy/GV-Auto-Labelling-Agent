@@ -80,6 +80,18 @@ def upsert_segments(segments: list[Segment]) -> None:
         s.commit()
 
 
+def replace_segments(video_id: str, segments: list[Segment]) -> None:
+    """Replace a video's segments (delete-then-insert) — used by resegmentation,
+    where new bounds change the segment count so stale rows must be dropped."""
+    with SessionLocal() as s:
+        s.query(m.Segment).filter_by(video_id=video_id).delete()
+        for seg in segments:
+            obj = m.Segment(segment_id=seg.segment_id)
+            s.add(obj)
+            _apply_segment(obj, seg)
+        s.commit()
+
+
 def get_segments(video_id: str) -> list[Segment]:
     """Ordered by idx."""
     with SessionLocal() as s:

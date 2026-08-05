@@ -323,6 +323,49 @@ async def ingest_video(video_id: str, concurrency: int = 8) -> Video:
     return video
 
 
+async def resegment_video(video_id: str, concurrency: int = 8) -> Video:
+    """Re-run segmentation + segment build from existing media, reusing the
+    stored ASR utterances (no re-ASR). Applies the current 30s-cap/gap-fill
+    Omni config to an already-ingested video cheaply. Replaces the video's
+    segments and refreshes global_overview; leaves utterances untouched.
+    """
+    cfg = base_config()["ingestion"]
+    media = MEDIA / f"{video_id}.mp4"
+    if not media.exists():
+        raise FileNotFoundError(media)
+
+    duration = _probe_duration(media)
+    row = _manifest_row(video_id)
+    video = Video(
+        video_id=video_id,
+        metadata=VideoMetadata(title=row.get("title"), channel_id=row.get("channel_id")),
+        duration_s=duration, source_blob=f"media/{video_id}.mp4",
+        status=VideoStatus.INGESTED)
+
+    sem = asyncio.Semaphore(concurrency)
+    omni = get_mllm()
+    temb, vemb = get_text_embedder(), get_image_embedder()
+
+    # Reuse stored time-keyed utterances instead of re-running ASR.
+    utts = storage.get_utterances(video_id)
+    bounds = await _omni_segments(media, duration, cfg["omni_window_seconds"],
+                                  cfg["omni_overlap_seconds"], omni,
+                                  float(cfg.get("max_segment_seconds", 30)))
+    segments = await _build_segments(video_id, media, bounds, utts, temb, vemb, sem)
+
+    if segments:
+        joined = "\n".join(f"[{s.idx}] {s.summary}" for s in segments)
+        video.global_overview = await omni.chat(
+            "Summarize the whole video in 3-5 sentences from these scene summaries:\n" + joined)
+        video.text_embedding = (await temb.embed([video.global_overview]))[0]
+
+    # upsert_video merges metadata_json (keeps collected fields); replace_segments
+    # drops stale rows since the new bounds change the segment count.
+    storage.upsert_video(video)
+    storage.replace_segments(video_id, segments)
+    return video
+
+
 def build_global_overview(video_id: str) -> str:
     v = storage.get_video(video_id)
     return (v.global_overview or "") if v else ""
