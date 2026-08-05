@@ -444,6 +444,12 @@ hr {
   gap: 3px;
   max-width: 360px;
 }
+/* Cap each value's description/rules/examples block so long rules lists scroll
+   inside their own cell instead of stretching the whole detail panel. */
+.attr-cell-scroll {
+  max-height: 180px;
+  overflow-y: auto;
+}
 
 /* ── Decision rule tree diagram (vertical priority cascade) ───────────── */
 /* Capped width + self-scrolling so the narrow cascade never widens the page. */

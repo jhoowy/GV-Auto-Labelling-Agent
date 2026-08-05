@@ -460,7 +460,6 @@ function AttributeSchemaRow({
   onSelect: () => void;
 }) {
   if (!sd || typeof sd !== "object") return null;
-  const keys = summaryKeys(sd);
   return (
     <button
       type="button"
@@ -471,13 +470,6 @@ function AttributeSchemaRow({
       <span className="attr-row-head">
         <span className="sig-name mono">{attr}</span>
         <Badge tone="gray">{String(sd.value_type ?? sd.kind ?? "—")}</Badge>
-      </span>
-      <span className="sig-keys">
-        {keys.map((k, i) => (
-          <span key={i} className="sig-chip">
-            {k}
-          </span>
-        ))}
       </span>
     </button>
   );
@@ -612,20 +604,28 @@ function AttributeDetail({
                       </button>
                     </td>
                     <td>{tr(lang, koVal?.label, obj.label)}</td>
-                    <td className="small">{tr(lang, koVal?.description, obj.description)}</td>
                     <td className="small">
-                      {dispRules.length > 0 ? (
-                        <ul className="attr-rules">
-                          {dispRules.map((r: string, j: number) => (
-                            <li key={j}>{r}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
+                      <div className="attr-cell-scroll">
+                        {tr(lang, koVal?.description, obj.description)}
+                      </div>
+                    </td>
+                    <td className="small">
+                      <div className="attr-cell-scroll">
+                        {dispRules.length > 0 ? (
+                          <ul className="attr-rules">
+                            {dispRules.map((r: string, j: number) => (
+                              <li key={j}>{r}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </div>
                     </td>
                     <td className="small muted">
-                      {ex.map((e: any) => String(e)).join("; ")}
+                      <div className="attr-cell-scroll">
+                        {ex.map((e: any) => String(e)).join("; ")}
+                      </div>
                     </td>
                   </tr>
                 );
