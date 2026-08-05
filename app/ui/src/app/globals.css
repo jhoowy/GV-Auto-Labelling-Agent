@@ -597,8 +597,8 @@ hr {
   line-height: 1.3;
   opacity: 0.95;
 }
-/* A rule node's short description (its primary text; conditions moved to the
-   click reveal). Wraps within the node box. */
+/* A rule node's short title (its primary text; full description + conditions
+   moved to the click reveal, #64). Wraps within the node box. */
 .dt-desc {
   font-size: 12px;
   line-height: 1.4;
@@ -628,6 +628,13 @@ hr {
 .dt-reveal-card {
   display: grid;
   gap: 6px;
+}
+/* Full rule description in the click-reveal (the node shows only the short
+   title). Sits above the condition list. */
+.dt-reveal-desc {
+  margin: 2px 0 0;
+  line-height: 1.45;
+  color: var(--text);
 }
 .dt-reveal-conds {
   margin: 6px 0 0;
