@@ -100,6 +100,42 @@ def segments_for_rule(category: str, rule_index: int) -> list[dict]:
     return out
 
 
+def rule_segment_counts(category: str) -> dict[int, int]:
+    """Per-rule count of segments matching each decision-tree rule of `category`.
+
+    Like `segments_for_rule` but a SINGLE pass over the category's labels,
+    tallying every rule at once (uncapped) — feeds the tree-node badges. The
+    fired rule is re-derived identically (re-apply the current tree to each
+    label's evidence). Keys are rule indices; key -1 collects labels where no
+    rule matched (the default). Missing `{cat}.rules` node -> {}."""
+    tree = _category_tree(category)
+    if tree is None:
+        return {}
+    rules, default, order = tree
+
+    sql = text(
+        """
+        SELECT l.evidence_attributes AS evidence
+        FROM labels l
+        WHERE l.category = :category
+        """
+    )
+    counts: dict[int, int] = {}
+    with SessionLocal() as sess:
+        rows = sess.execute(sql, {"category": category}).mappings()
+        for r in rows:
+            values = {
+                a.get("key"): a.get("value")
+                for a in (r["evidence"] or [])
+                if isinstance(a, dict) and a.get("key") and a.get("value") != ""
+            }
+            _score, matched = decision_tree._apply_decision_tree(
+                rules, default, values, order)
+            idx = rules.index(matched) if matched is not None else -1
+            counts[idx] = counts.get(idx, 0) + 1
+    return counts
+
+
 def segments_for_attribute_value(
     category: str, attribute: str, value: str,
 ) -> list[dict]:

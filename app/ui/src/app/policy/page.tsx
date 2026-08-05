@@ -6,6 +6,7 @@ import {
   getAttributeValueExamples,
   getAttributeValueSegments,
   getPolicies,
+  getRuleCounts,
   getRuleSegments,
   listChangeRequests,
   listPolicySets,
@@ -270,8 +271,83 @@ function SegmentTrackPanel({
   );
 }
 
+// The decision-tree's right-side panel: lists the segments matching the clicked
+// tree node (rule or default) as thumbnail deep-links. Richer than
+// SegmentTrackPanel — each item carries the keyframe + video id and links to the
+// exact segment in the viewer. Remount (via `key`) to refetch for a new node.
+function RuleSegmentPanel({
+  title,
+  category,
+  ruleIndex,
+  onClose,
+}: {
+  title: string;
+  category: Category;
+  ruleIndex: number;
+  onClose: () => void;
+}) {
+  const { data, loading, error } = useAsync(
+    () => getRuleSegments(category, ruleIndex),
+    [],
+  );
+  const segs = data ?? [];
+  return (
+    <div className="card dt-seg-panel">
+      <div className="row spread">
+        <strong className="small">{title}</strong>
+        <button className="btn" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <AsyncState
+        loading={loading}
+        error={error}
+        empty={segs.length === 0}
+        emptyText="No segments were labelled via this node."
+      >
+        <div className="dt-seg-list">
+          {segs.map((s) => (
+            <a
+              key={s.segment_id}
+              className="dt-seg-item"
+              // Deep-link to the exact segment; the viewer seeks to its start.
+              href={`/viewer/${encodeURIComponent(s.video_id)}?segment=${encodeURIComponent(s.segment_id)}`}
+            >
+              <img
+                className="dt-seg-thumb"
+                src={segmentKeyframeUrl(s.segment_id)}
+                alt=""
+                loading="lazy"
+                width={72}
+                height={40}
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
+              />
+              <span className="dt-seg-meta">
+                <span className="mono small">{s.segment_id}</span>
+                <span className="muted small">{s.video_id}</span>
+              </span>
+              <ScoreBadge score={s.score} />
+            </a>
+          ))}
+        </div>
+        {segs.length >= TRACK_CAP && (
+          <div className="muted small" style={{ marginTop: 6 }}>
+            Showing first {TRACK_CAP} matches.
+          </div>
+        )}
+      </AsyncState>
+    </div>
+  );
+}
+
 function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang }) {
   const { data, loading, error } = useAsync(() => getPolicies(category), [category]);
+  // Per-rule matching-segment counts for the tree-node badges (fetched once per
+  // category). Keyed by rule index (string) plus a `default` bucket.
+  const { data: countsData } = useAsync(() => getRuleCounts(category), [category]);
+  const ruleCounts = countsData ?? {};
   const flat = data ?? [];
   const roots = normalizeTree(flat);
   const decisionNode = flat.find((n) => n.type === "decision_rule") ?? null;
@@ -414,25 +490,31 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
           </div>
         </div>
 
-        {/* ── Decision rule tree: its OWN full-width section, so the cascade no
-            longer cramps the attribute list. Clicking a rule node reveals its
-            conditions here AND drives the attribute highlight + #14 tracking. */}
-        <div className="dt-section">
-          <DecisionTreeDiagram
-            node={decisionNode}
-            rules={rules}
-            selected={selectedRule}
-            onSelect={onSelectRule}
-            lang={lang}
-          />
+        {/* ── Decision rule tree: the cascade sits on the LEFT; clicking a node
+            opens a segment-list panel to its RIGHT (stacks below when narrow).
+            Selecting a rule also reveals its conditions (panel header) and drives
+            the attribute highlight. Each node badges its score + segment count. */}
+        <div className={`dt-section${selectedRule != null ? " split" : ""}`}>
+          <div className="dt-tree-col">
+            <DecisionTreeDiagram
+              node={decisionNode}
+              rules={rules}
+              counts={ruleCounts}
+              selected={selectedRule}
+              onSelect={onSelectRule}
+              lang={lang}
+            />
+          </div>
           {selectedRule != null && rules[selectedRule] && (
-            <div className="dt-reveal">
+            <div className="dt-panel-col">
+              {/* Conditions/description reveal for the clicked rule (#64). */}
               <RuleConditions rule={rules[selectedRule]} index={selectedRule} lang={lang} />
-              {/* #14: the segments this rule labelled, alongside its conditions. */}
-              <SegmentTrackPanel
+              {/* #14: the segments this rule labelled, listed to the tree's right. */}
+              <RuleSegmentPanel
                 key={`${category}-rule-${selectedRule}`}
                 title={`Segments labelled via rule #${selectedRule + 1}`}
-                fetcher={() => getRuleSegments(category, selectedRule)}
+                category={category}
+                ruleIndex={selectedRule}
                 onClose={() => setSelectedRule(null)}
               />
             </div>
@@ -854,13 +936,13 @@ function LeafNode({
   x,
   y,
   score,
-  note,
+  count,
   label,
 }: {
   x: number;
   y: number;
   score: number;
-  note?: string;
+  count?: number;
   label: string;
 }) {
   return (
@@ -879,7 +961,7 @@ function LeafNode({
             <span className="dt-leaf-score">{score}</span>
             <span className="dt-leaf-tag">{label}</span>
           </div>
-          {note && <div className="dt-leaf-note">{note}</div>}
+          {count != null && <div className="dt-leaf-count">{count} seg</div>}
         </div>
       </foreignObject>
     </g>
@@ -896,6 +978,7 @@ function RuleNode({
   h,
   index,
   rule,
+  count,
   text,
   selected,
   onClick,
@@ -905,6 +988,7 @@ function RuleNode({
   h: number;
   index: number;
   rule: any;
+  count: number;
   text: string;
   selected: boolean;
   onClick: () => void;
@@ -923,7 +1007,10 @@ function RuleNode({
         <div className="dt-nodebox">
           <div className="dt-rulehead">
             <span>Rule #{index + 1}</span>
-            <span className="dt-rulescore">→ score {String(rule?.score ?? "—")}</span>
+            {/* score + matching-segment count badge (replaces the CART-leaf note). */}
+            <span className="dt-rulescore">
+              score {String(rule?.score ?? "—")} · {count} seg
+            </span>
           </div>
           <div className="dt-desc">{text}</div>
         </div>
@@ -935,12 +1022,14 @@ function RuleNode({
 function DecisionTreeDiagram({
   node,
   rules,
+  counts,
   selected,
   onSelect,
   lang,
 }: {
   node: Policy | null;
   rules: any[];
+  counts: Record<string, number>;
   selected: number | null;
   onSelect: (i: number) => void;
   lang: Lang;
@@ -948,11 +1037,6 @@ function DecisionTreeDiagram({
   const sd = node?.structured_data;
   if (!node || !sd || sd.kind !== "decision_tree") return null;
   const def = Number(sd.default ?? 0);
-  // Korean rule-note overrides (index-aligned to `rules`); notes only.
-  const ko = koOf(sd);
-  const koRules: any[] = Array.isArray(ko?.rules) && ko.rules.length === rules.length
-    ? ko.rules
-    : [];
 
   // Each node's primary text: short title (KO-aware) or condition-summary fallback.
   const texts = rules.map((r) => ruleTitle(lang, r));
@@ -1045,7 +1129,7 @@ function DecisionTreeDiagram({
                 x={leafX}
                 y={p.y}
                 score={Number(rules[i]?.score ?? 0)}
-                note={tr(lang, koRules[i]?.note, rules[i]?.note) || undefined}
+                count={counts[String(i)] ?? 0}
                 label="match"
               />
             ))}
@@ -1053,9 +1137,8 @@ function DecisionTreeDiagram({
               x={ruleX}
               y={defaultY}
               score={def}
+              count={counts["default"] ?? 0}
               label="default"
-              // Short default title if the policy provides one (#64), else the note.
-              note={tr(lang, ko?.default_title ?? ko?.default_note, (sd as any)?.default_title ?? "no rule matched")}
             />
             {pos.map((p, i) => (
               <RuleNode
@@ -1065,6 +1148,7 @@ function DecisionTreeDiagram({
                 h={p.h}
                 index={i}
                 rule={rules[i]}
+                count={counts[String(i)] ?? 0}
                 text={texts[i]}
                 selected={selected === i}
                 onClick={() => onSelect(i)}
@@ -1074,9 +1158,9 @@ function DecisionTreeDiagram({
         )}
       </div>
       <div className="muted small" style={{ marginTop: 6 }}>
-        Nodes show a short title — click a rule node to reveal its full
-        description and exact conditions, highlight the attributes it reads, and
-        list the segments it labelled.
+        Each node badges its score and matching-segment count — click a rule node
+        to reveal its full description and exact conditions, highlight the
+        attributes it reads, and list its segments in the panel on the right.
       </div>
     </div>
   );
