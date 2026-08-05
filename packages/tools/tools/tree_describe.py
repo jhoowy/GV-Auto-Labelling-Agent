@@ -5,10 +5,11 @@ is machine-shaped — `{"when":[...],"score":int,"note":"CART leaf (n=..)"}` —
 legible to `_apply_decision_tree` but opaque to a human reviewer. Here ONE
 `get_policy_llm().complete_json` call turns the ordered rules (their conditions +
 assigned score) plus the attribute DEFINITIONS (which give each value its meaning)
-into a short English sentence + Korean translation per rule. These are merged back
-onto the rule dicts BY INDEX and the node is re-saved via
-`upsert_decision_rule` — the storage format is unchanged (`_apply_decision_tree`
-ignores the extra `description`/`description_ko` keys); the descriptions are pure
+into a short TITLE-LEVEL label (~3-6 words) plus a full sentence, each with a
+Korean translation, per rule. These are merged back onto the rule dicts BY INDEX
+and the node is re-saved via `upsert_decision_rule` — the storage format is
+unchanged (`_apply_decision_tree` ignores the extra
+`title`/`title_ko`/`description`/`description_ko` keys); they are pure
 presentation.
 
 The index-merge (`_merge_descriptions`) is a pure function so it is unit-testable
@@ -26,12 +27,18 @@ _SYSTEM = (
     "You document a content-moderation decision tree for gameplay video. You are "
     "given a category's ordered rules (each a conjunction of attribute conditions "
     "plus an assigned age score 0-5) and the attribute DEFINITIONS that give each "
-    "value its meaning, plus a fallthrough default score. For EACH rule write one "
-    "short concrete sentence describing the content that rule captures and why it "
-    "earns its score, and a natural Korean translation of that sentence. Also "
-    "describe the default (no-rule-matches) case. Return JSON exactly as: "
-    '{"rules":[{"index":<int>,"description":<en>,"description_ko":<ko>}, ...], '
-    '"default_description":<en>, "default_description_ko":<ko>} with one rules '
+    "value its meaning, plus a fallthrough default score. For EACH rule write: "
+    "(a) a short TITLE-LEVEL label of ~3-6 words naming the content the rule "
+    'captures (e.g. "No gambling", "Incidental no-stake play", "Explicit betting '
+    'solicitation"), and its natural Korean translation; and (b) one short '
+    "concrete sentence describing that content and why it earns its score, and a "
+    "natural Korean translation of that sentence. Titles are terse labels, "
+    "descriptions are full sentences. Also title + describe the default "
+    "(no-rule-matches) case. Return JSON exactly as: "
+    '{"rules":[{"index":<int>,"title":<en>,"title_ko":<ko>,'
+    '"description":<en>,"description_ko":<ko>}, ...], '
+    '"default_title":<en>,"default_title_ko":<ko>,'
+    '"default_description":<en>,"default_description_ko":<ko>} with one rules '
     "entry per input rule, index-aligned to the input order."
 )
 
@@ -76,15 +83,17 @@ def _clean(s):
 
 
 def _merge_descriptions(rules, response) -> list[dict]:
-    """PURE: merge an LLM response's per-index EN/KO descriptions onto `rules`.
+    """PURE: merge an LLM response's per-index EN/KO title + description onto `rules`.
 
-    `response` is `{"rules":[{"index","description","description_ko"}, ...]}`.
-    Each entry sets `description`/`description_ko` on `rules[index]` when `index`
-    is a real in-range position; entries that are malformed, out of range, or
-    carry blank text are ignored, and rules the response omits keep their prior
-    state — so a short / long / misaligned response can only ADD aligned
-    descriptions, never corrupt the tree. Returns a NEW list of shallow-copied
-    rule dicts; the `{when,score,note}` storage keys are untouched."""
+    `response` is
+    `{"rules":[{"index","title","title_ko","description","description_ko"}, ...]}`.
+    Each entry sets any of `title`/`title_ko`/`description`/`description_ko` on
+    `rules[index]` when `index` is a real in-range position; entries that are
+    malformed, out of range, or carry blank text (per field) are ignored, and
+    rules the response omits keep their prior state — so a short / long /
+    misaligned response can only ADD aligned fields, never corrupt the tree.
+    Returns a NEW list of shallow-copied rule dicts; the `{when,score,note}`
+    storage keys are untouched."""
     out = [dict(r) for r in rules]
     entries = response.get("rules") if isinstance(response, dict) else None
     for e in entries or []:
@@ -93,10 +102,10 @@ def _merge_descriptions(rules, response) -> list[dict]:
         idx = e.get("index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(out):
             continue
-        if (desc := _clean(e.get("description"))) is not None:
-            out[idx]["description"] = desc
-        if (desc_ko := _clean(e.get("description_ko"))) is not None:
-            out[idx]["description_ko"] = desc_ko
+        # each field set independently; a blank one is skipped, not invented.
+        for key in ("title", "title_ko", "description", "description_ko"):
+            if (val := _clean(e.get(key))) is not None:
+                out[idx][key] = val
     return out
 
 
@@ -143,10 +152,14 @@ def describe_rules(category, llm=None) -> dict:
     response = llm.complete_json(_SYSTEM, user)
 
     described = _merge_descriptions(rules, response)
-    dd = _clean(response.get("default_description")) if isinstance(response, dict) else None
-    dd_ko = _clean(response.get("default_description_ko")) if isinstance(response, dict) else None
+    resp = response if isinstance(response, dict) else {}
+    dt = _clean(resp.get("default_title"))
+    dt_ko = _clean(resp.get("default_title_ko"))
+    dd = _clean(resp.get("default_description"))
+    dd_ko = _clean(resp.get("default_description_ko"))
     policy_store.upsert_decision_rule(
         cat, described, default,
+        default_title=dt, default_title_ko=dt_ko,
         default_description=dd, default_description_ko=dd_ko)
 
     n_desc = sum(1 for r in described if r.get("description"))
