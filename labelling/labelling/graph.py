@@ -105,8 +105,15 @@ _BOOTSTRAP_ONE_SYS = (
     "+ per-value rules). For EACH category do BOTH in one pass: (a) EXTRACT a "
     "value + short evidence for EVERY listed attribute, obeying each attribute's "
     "value_type and allowed values exactly (booleans as true/false); and (b) "
-    "assign a FREE 0-5 PEGI age score (0:3+, 1:7+, 2:12+, 3:16+, 4:18+, "
-    "5:blocked) with a one-line rationale. If the sampled frames are insufficient "
+    "assign a 0-5 score for how strongly THIS CATEGORY's own content in the "
+    "shot warrants an age restriction. Score ONLY this category, NOT a general "
+    "age rating for the video: a shot with NONE of this category's content — "
+    "i.e. its attributes are all none/absent, the usual case for ordinary "
+    "gameplay — MUST be 0. Raise the score only with the severity of this "
+    "category's content that is actually present (1:7+, 2:12+, 3:16+, 4:18+, "
+    "5:blocked). Give a one-line rationale consistent with the score (if the "
+    "rationale says the content is absent, the score is 0). If the sampled "
+    "frames are insufficient "
     "to judge, set need_more_frames=true. Return ONLY JSON of the form "
     '{"categories":[{"category":str,'
     '"attributes":{"<name>":{"value":<value>,"evidence":str}},'
