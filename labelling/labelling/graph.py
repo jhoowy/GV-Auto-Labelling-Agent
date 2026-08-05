@@ -83,6 +83,23 @@ _EXTRACT_SYS = (
     '"gap_note":str}}.'
 )
 
+_BOOTSTRAP_ONE_SYS = (
+    "You are a content-moderation labelling agent for gameplay videos, "
+    "bootstrapping a policy set from unlabelled data (no precedents exist yet). "
+    "You are given the TARGET SHOT's up-to-5 sampled frames plus its summary and "
+    "ASR text, and a list of CATEGORIES, each with its ATTRIBUTES (allowed values "
+    "+ per-value rules). For EACH category do BOTH in one pass: (a) EXTRACT a "
+    "value + short evidence for EVERY listed attribute, obeying each attribute's "
+    "value_type and allowed values exactly (booleans as true/false); and (b) "
+    "assign a FREE 0-5 PEGI age score (0:3+, 1:7+, 2:12+, 3:16+, 4:18+, "
+    "5:blocked) with a one-line rationale. If the sampled frames are insufficient "
+    "to judge, set need_more_frames=true. Return ONLY JSON of the form "
+    '{"categories":[{"category":str,'
+    '"attributes":{"<name>":{"value":<value>,"evidence":str}},'
+    '"score":int,"rationale":str}],"need_more_frames":bool} with one entry per '
+    "category."
+)
+
 _SELECT_SYS = (
     "You are a content-moderation labelling agent for gameplay videos. Decide "
     "which policy CATEGORIES are relevant to the TARGET SHOT and, for each "
@@ -771,58 +788,56 @@ def _build_bootstrap_label(seg, cat, score, rationale, cited, defs, idx,
 
 def _judge_bootstrap_attrs(orch, state, seg, asr, frames, cats, cat_defs,
                            policies):
-    """Bootstrap attribute path: EXTRACT every defined attribute (no SELECT — all
-    are extracted) then assign a FREE holistic score per category (one scoring
-    call, NOT the decision tree, which does not exist yet). The extracted vector
-    + free score become the CART training rows. Returns labels."""
+    """Bootstrap attribute path: ONE combined call per shot. A single
+    orch.judge(...) both EXTRACTs every defined attribute for every category AND
+    assigns each a FREE 0-5 score (no decision tree exists yet). The extracted
+    vector + free score become the CART training rows. Exactly one orchestrator
+    call per shot (two only if the frame-retry fires). Returns labels."""
     idx_by_cat = {c: _attr_index(cat_defs[c]) for c in cats}
-
-    # EXTRACT — one call per category over ALL its attributes; display values feed
-    # the scoring call for grounding.
-    extracted_by_cat: dict[str, dict] = {}
-    display: list[Attribute] = []
-    for cat in cats:
-        idx = idx_by_cat[cat]
-        extracted = _extract_selected(
-            orch, state, seg, asr, frames, cat, idx, idx["names"])
-        extracted_by_cat[cat] = extracted
-        for n, o in extracted.items():
-            display.append(Attribute(
-                key=f"{cat}.{n}", value=_attr_value(o.get("value")),
-                layer=AttributeLayer.POLICY, source="judge/extract",
-                evidence=str(o.get("evidence") or "") or None))
-
-    # FREE holistic score across these categories, grounded in the extracted
-    # attributes (shown as policy_attributes). No precedents exist in bootstrap.
-    system = _JUDGE_SYS.format(cats=", ".join(cats))
-    policy_text = "\n".join(
-        f"- ({p.policy_id},v{p.version}) [{p.type.value}/{p.category.value}] {p.text}"
-        for p in policies if p.category.value in cats
-    ) or "none"
     version_by_id = {p.policy_id: p.version for p in policies}
-    prompt = _judge_prompt(state, seg, asr, display, policy_text, [])
-    parsed = _parse_json(orch.judge(system, prompt, frames))
+
+    # ONE prompt: every category with its attribute renderings (allowed values +
+    # per-value rules), asking for extract + free score in a single JSON reply.
+    cats_block = "\n\n".join(
+        f"CATEGORY: {cat}\n" + "\n".join(
+            idx_by_cat[cat]["line_by_name"][n] for n in idx_by_cat[cat]["names"])
+        for cat in cats
+    ) or "none"
+    prompt = (
+        f"GLOBAL VIDEO OVERVIEW:\n{state.get('global_overview', '') or 'n/a'}\n\n"
+        f"CARRY-OVER (confirmed so far):\n{state.get('carry_over', '') or 'none'}\n\n"
+        f"TARGET SHOT (frames attached below):\n{_segment_block(seg, asr, [])}\n\n"
+        f"CATEGORIES AND THEIR ATTRIBUTES:\n{cats_block}\n\n"
+        "For every category: extract all its attributes AND assign a free 0-5 score."
+    )
+    parsed = _parse_json(orch.judge(_BOOTSTRAP_ONE_SYS, prompt, frames))
     if parsed.get("need_more_frames") and frames:
         more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
-        parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
+        parsed = _parse_json(orch.judge(_BOOTSTRAP_ONE_SYS, prompt, more)) or parsed
 
-    judged: dict[str, dict] = {}
-    for j in parsed.get("judgements", []) or []:
-        c = j.get("category")
-        if c in cats and c not in judged:
-            judged[c] = j
+    # Index the single response by category (first entry per category wins).
+    by_cat: dict[str, dict] = {}
+    for c in parsed.get("categories", []) or []:
+        name = c.get("category")
+        if name in cats and name not in by_cat:
+            by_cat[name] = c
 
     labels: list[Label] = []
     for cat in cats:
         idx = idx_by_cat[cat]
-        j = judged.get(cat, {})
-        score = _clamp(j.get("score"))
-        rationale = (j.get("rationale", "") or "") or (
+        entry = by_cat.get(cat, {})
+        # Keep only defined attribute names, in the {name:{value,evidence}} shape
+        # _build_bootstrap_label expects; a missing category -> empty extracted.
+        raw = entry.get("attributes") or {}
+        extracted = {n: o for n, o in raw.items()
+                     if isinstance(o, dict) and n in idx["def_by_name"]}
+        score = _clamp(entry.get("score"))
+        rationale = (entry.get("rationale", "") or "") or (
             f"[{cat}] free bootstrap score {score} (no decision tree yet).")
-        cited = _normalise_pins(list(j.get("cited_policy_ids") or []), version_by_id)
+        cited = _normalise_pins(list(entry.get("cited_policy_ids") or []),
+                                version_by_id)
         labels.append(_build_bootstrap_label(
-            seg, cat, score, rationale, cited, cat_defs[cat], idx,
-            extracted_by_cat[cat]))
+            seg, cat, score, rationale, cited, cat_defs[cat], idx, extracted))
     return labels
 
 
