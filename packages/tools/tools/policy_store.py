@@ -238,7 +238,7 @@ def upsert_attribute_definition(
     name: str,
     value_type: str,
     guidelines: str,
-    scores_informed: list[int],
+    scores_informed: list[int] | None = None,
     values: list | None = None,
     examples: list | None = None,
 ) -> Policy:
@@ -250,32 +250,34 @@ def upsert_attribute_definition(
     `{"value","label","description","examples"}` dicts (a plain `list[str]` is
     coerced to that form). For `ordinal`, values are kept in ascending order so
     rules can compare with `>=`. `guidelines` describe how to detect the
-    attribute from a shot; `scores_informed` are the PEGI score bands this
-    attribute is evidence for. Reuses the versioned upsert path (bump +
-    history)."""
+    attribute from a shot. `scores_informed` is optional (retired informs-score
+    hint); when empty it is omitted from the stored `structured_data`. Reuses the
+    versioned upsert path (bump + history)."""
     cat = getattr(category, "value", category)
-    scores = [int(s) for s in scores_informed]
+    scores = [int(s) for s in scores_informed] if scores_informed else []
     coerced = _coerce_values(values)
     # Fold a flat top-level `examples` (legacy callers) into the first value.
     if examples and coerced:
         coerced[0]["examples"] = list(coerced[0]["examples"]) + list(examples)
-    text = (
-        f"Attribute '{name}' ({value_type}) for {cat}. {guidelines} "
-        f"Informs scores: {', '.join(str(s) for s in scores) or 'none'}."
-    )
+    text = f"Attribute '{name}' ({value_type}) for {cat}. {guidelines}"
+    if scores:
+        text += f" Informs scores: {', '.join(str(s) for s in scores)}."
+    structured_data: dict = {
+        "kind": "attribute_def",
+        "value_type": value_type,
+        "values": coerced,
+        "guidelines": guidelines,
+    }
+    # Only persist the key when non-empty (backward-compatible with old callers).
+    if scores:
+        structured_data["scores_informed"] = scores
     return upsert_policy(Policy(
         policy_id=f"{cat}.attr.{name}",
         type=PolicyType.ATTRIBUTE,
         category=Category(cat),
         parent_id=f"{cat}.scoring",
         text=text,
-        structured_data={
-            "kind": "attribute_def",
-            "value_type": value_type,
-            "values": coerced,
-            "guidelines": guidelines,
-            "scores_informed": scores,
-        },
+        structured_data=structured_data,
     ))
 
 

@@ -364,128 +364,122 @@ details.signals > summary .sig-name {
   margin-top: 10px;
 }
 
-/* ── Decision rule tree diagram (dt-labeling top-down tree) ───────────── */
+/* ── Decision rule tree diagram (vertical priority cascade) ───────────── */
+/* Capped width + self-scrolling so the narrow cascade never widens the page. */
 .dt-wrap {
   overflow: auto;
   max-height: 680px;
+  max-width: min(100%, 760px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--bg);
+  background: var(--panel);
   padding: 8px;
 }
-.tree-svg {
+.dt-svg {
   display: block;
-  margin: 0 auto;
 }
-.tree-edge {
+.dt-edge {
   fill: none;
   stroke: #c2c8d0;
   stroke-width: 1.6;
 }
-.tree-edge-label rect {
-  fill: var(--panel);
-  stroke: var(--border);
+.dt-edge.match {
+  stroke: var(--ok);
 }
-.tree-edge-label text {
-  font-size: 11px;
+.dt-pill rect {
+  fill: var(--panel);
+  stroke: #c2c8d0;
+  stroke-width: 1.2;
+}
+.dt-pill.match rect {
+  stroke: var(--ok);
+}
+.dt-pill text {
+  font-size: 10px;
   font-weight: 700;
-  text-anchor: middle;
   fill: var(--muted);
 }
-.tree-edge-label.yes text {
+.dt-pill.match text {
   fill: var(--ok);
 }
-.tree-edge-label.no text {
-  fill: var(--danger);
-}
-.tree-q {
+.dt-node {
   cursor: pointer;
 }
-.tree-q-rect {
+.dt-node-rect {
   fill: var(--panel);
   stroke: var(--border);
   stroke-width: 1.4;
   transition: stroke 0.1s ease;
 }
-.tree-q:hover .tree-q-rect {
+.dt-node:hover .dt-node-rect {
   stroke: var(--accent);
 }
-.tree-q.selected .tree-q-rect {
+.dt-node.selected .dt-node-rect {
   stroke: var(--accent);
   stroke-width: 2.4;
   fill: var(--accent-soft);
 }
-.tree-qbox {
+.dt-nodebox {
   height: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
   overflow: hidden;
   font-size: 12px;
   line-height: 1.4;
 }
-.tree-q-title {
+.dt-rulehead {
+  display: flex;
+  justify-content: space-between;
   font-weight: 700;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
 }
-.tree-cond {
+.dt-rulescore {
+  color: var(--muted);
+  font-weight: 600;
+}
+.dt-cond {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   overflow-wrap: anywhere;
 }
-.tree-cond .tree-attr {
+.dt-cond .dt-attr {
   color: var(--text);
   font-weight: 600;
 }
-.tree-cond .tree-op {
+.dt-cond .dt-op {
   color: var(--accent);
   font-weight: 700;
 }
-.tree-cond .tree-val {
+.dt-cond .dt-val {
   color: var(--muted);
 }
-.tree-leaf {
-  cursor: default;
-}
-.tree-leaf.pickable {
-  cursor: pointer;
-}
-.tree-leaf-rect {
-  stroke-width: 2;
-  transition: stroke-width 0.1s ease;
-}
-.tree-leaf.pickable:hover .tree-leaf-rect {
-  stroke-width: 3;
-}
-.tree-leaf.selected .tree-leaf-rect {
-  stroke-width: 3.4;
-}
-.tree-leafbox {
+.dt-leafbox {
   height: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
+  color: #fff;
   overflow: hidden;
-  color: var(--text);
 }
-.tree-leaf-head {
+.dt-leaf-head {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.tree-leaf-score {
+.dt-leaf-score {
   font-size: 18px;
   font-weight: 800;
   line-height: 1;
 }
-.tree-leaf-tag {
+.dt-leaf-tag {
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--muted);
+  opacity: 0.85;
 }
-.tree-leaf-note {
+.dt-leaf-note {
   margin-top: 3px;
   font-size: 11px;
   line-height: 1.3;
-  color: var(--muted);
+  opacity: 0.95;
 }
 
 .db-table {
