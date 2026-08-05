@@ -140,8 +140,9 @@ def test_build_label_stores_unselected_attribute_empty():
     assert ev["intensity"].source == "judge/unselected"
     assert ev["intensity"].evidence is None
     assert ev["intensity"].layer == AttributeLayer.POLICY
-    # trajectory rides in tool_trace; pins cover both attr defs + the rule node
-    assert lbl.tool_trace == [{"decision": trajectory}]
+    # no per-label tool_trace is stored; the fired rule is re-derived from
+    # evidence_attributes. pins cover both attr defs + the rule node.
+    assert lbl.tool_trace == []
     assert set(lbl.cited_policy_ids) == {
         "sex.attr.nudity,v1", "sex.attr.intensity,v1", "sex.rules,v1"}
     assert "rule #0 matched" in lbl.rationale

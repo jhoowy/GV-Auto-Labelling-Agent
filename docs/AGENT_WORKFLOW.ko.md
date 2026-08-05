@@ -95,7 +95,7 @@ flowchart TB
   Q -->|"정책 없음 / bootstrap — holistic"| HD["구조화 신호 파생<br/>(예: ASR에 term-level word-list로 욕설 매칭)"]
   HD --> HS["N개 카테고리에 멀티모달 채점 호출 1회<br/>0..5 · rationale · cited pin · evidence"]
   HS --> CK{"선례와 비교"}
-  CK -->|"배치(divergent)"| ISS["decision 항목에 precedent_divergence 기록<br/>(자동 재판정 없음)"]
+  CK -->|"배치(divergent)"| ISS["rationale에 선례 divergence 기록<br/>(자동 재판정 없음)"]
 
   EXT -.->|"프레임 부족"| EXP["expand_frames → 1회 재추출"]
   HS -.->|"프레임 부족"| EXP
@@ -115,7 +115,8 @@ flowchart TB
   카테고리는 EXTRACT 호출을 건너뛴다.
 - **DECIDE** — 추출값만으로 코드에서 트리를 **결정적으로** 적용(LLM 호출 없음)해
   `score`와 **trajectory**(`{selected, extracted, rule_index, rule_note, score}`)를
-  산출한다.
+  산출한다. trajectory는 REVIEW 프롬프트·rationale·score를 만드는 데 in-process로만
+  쓰이며 **저장되지 않는다**.
 - **REVIEW** — 카테고리 전체를 대상으로 한 호출 1회로 각 카테고리의 score +
   trajectory를 주입한다. 모델은 적절성을 판정하지만 **score를 바꿀 수 없다**;
   `needs_change`를 표시하면 JUDGE는 그 decision-rule 노드를 타깃으로 **rule-change
@@ -125,11 +126,13 @@ flowchart TB
   (`source=judge/extract`), 선택되지 않은/empty인 것은 EMPTY 값으로 저장된다
   (`value=""`, `evidence=None`, `source=judge/unselected`) — 다운스트림에서
   "고려했으나 empty"를 구분할 수 있게. cited pin = 모든 attr-def 노드 + rule 노드;
-  trajectory는 `tool_trace`에 담기고; rationale은 매칭 규칙 note다.
+  rationale은 매칭 규칙 note다. **라벨별 `tool_trace`는 저장하지 않는다** —
+  발화된 규칙은 필요 시 `evidence_attributes`에서 재도출한다(아래 *노드 → segment
+  추적* 참고).
 
 **Holistic 폴백**(합성된 정책이 없는 카테고리, 그리고 bootstrap 중의 *모든*
 카테고리): 멀티모달 호출 1회가 프레임 + summary + ASR에서 직접 카테고리를 채점하며,
-먼저 구조화 term-level 신호를 파생하고 선례 divergence를 decision 항목에 기록한다.
+먼저 구조화 term-level 신호를 파생하고 선례 divergence를 **rationale에** 기록한다.
 
 구조화 출력은 **강제하지 않는다**; 모델이 반환한 JSON 유사 텍스트를 관대하게
 파싱한다. 일관성 divergence는 자동 보정하지 않고 **기록**된다.
@@ -155,22 +158,34 @@ JUDGE가 만든 proposal을 shape별로 dispatch한다(여기서만 도달 가�
 갱신한다. `cursor += window_stride`; `cursor < len(all_segments)`면 LOAD로 루프,
 아니면 END.
 
+## 노드 → segment 추적
+
+검토자가 정책 노드를 클릭하면 그 노드를 통해 라벨링된 segment를 볼 수 있다
+(`tools.tracking`, 읽기 전용, 저장 없음):
+- **attribute 값 → segment**(`segments_for_attribute_value`) — 그 key/value를
+  `evidence_attributes`에 담은 라벨을 매칭한다.
+- **결정 트리 규칙 → segment**(`segments_for_rule`) — 라벨에 trace를 **저장하지
+  않으므로** 발화된 규칙을 **재도출**한다: 카테고리의 각 라벨에 대해 비어 있지 않은
+  `evidence_attributes`에서 `values`를 재구성하고, 카테고리의 **현재** 결정 트리를
+  공용·DB-free `tools.decision_tree` 모듈(에이전트가 채점에 쓴 바로 그 코드)로 다시
+  적용해, 매칭된 규칙의 인덱스가 요청한 인덱스와 같을 때 그 segment를 포함한다.
+
 ## Issues 로그
 
 라벨별 rationale 외에, holistic 경로는 점수가 유사 shot의 확정 라벨과 크게
-어긋날 때 라벨의 compact `decision` 항목 안에 **precedent_divergence**를
-기록한다 — human manager가 group화해 분류(triage)하도록 보존되며 자동 보정되지
-않는다. (오디오 입력 부재 같은 더 큰 기능 공백은 per-run trace가 아니라 **저장소
-issue**로 추적한다.)
+어긋날 때 라벨의 **rationale에** 선례 divergence를 기록한다 — human manager가
+group화해 분류(triage)하도록 보존되며 자동 보정되지 않는다. (오디오 입력 부재
+같은 더 큰 기능 공백은 per-run trace가 아니라 **저장소 issue**로 추적한다.)
 
 ## 출력 계약(Output contract)
 
 판정된 각 shot은 `Label` row를 만든다(`packages/schemas` 참고): `category`,
 `score`, `rationale`, `cited_policy_ids`, `evidence_attributes`,
-`used_segment_ids`, `tool_trace`, `confidence`. 라벨의 감사 기록은
+`used_segment_ids`, `confidence`. 라벨의 감사 기록은
 **evidence_attributes**(추출된 attribute + evidence + attribute 노드의 version),
 정규 `(policy_id, version)` pin인 **cited_policy_ids**(attribute-def 노드 + 규칙
-노드, 환각 id는 제거되고 실제 version이 재부착됨), 그리고 rationale에 담긴 매칭
-규칙 note다. `tool_trace`에는 단일 compact `{"decision": …}` 항목만 남는다 —
-이전의 장황한 stage/tool 덤프는 제거됨. 이 pin들은 `policy_versions` 히스토리를
-통해 사용된 정확한 텍스트로 해석되어 모든 라벨을 재현·감사 가능하게 만든다.
+노드, 환각 id는 제거되고 실제 version이 재부착됨), 그리고 **rationale**에 담긴 매칭
+규칙 note다. 라벨은 **라벨별 `tool_trace`를 담지 않는다**(컬럼은 유지하되 빈 `[]`로
+저장). 발화된 결정 트리 규칙은 필요할 때 `evidence_attributes`에서 재도출한다
+(노드 → segment 추적). 이 pin들은 `policy_versions` 히스토리를 통해 사용된 정확한
+텍스트로 해석되어 모든 라벨을 재현·감사 가능하게 만든다.

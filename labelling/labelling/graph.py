@@ -28,7 +28,21 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 
 from schemas import Attribute, Label
-from schemas.enums import SCORE_MAX, SCORE_MIN, AttributeLayer, Category
+from schemas.enums import AttributeLayer, Category
+
+# Deterministic decision-tree evaluation lives in the shared, DB-free
+# `tools.decision_tree` module (also used by node->segment tracking to re-derive
+# the fired rule). Re-exported here so graph.py and its tests keep importing
+# these names unchanged.
+from tools.decision_tree import (  # noqa: F401
+    _apply_decision_tree,
+    _as_bool,
+    _as_num,
+    _clamp,
+    _match_cond,
+    _ordinal_rank,
+    _val_eq,
+)
 
 from . import tools as agent_tools
 from .state import LabellingState
@@ -149,14 +163,6 @@ def _categories() -> list[str]:
     return list(cats) if cats else [c.value for c in Category]
 
 
-def _clamp(score) -> int:
-    try:
-        s = int(score)
-    except (TypeError, ValueError):
-        s = SCORE_MIN
-    return max(SCORE_MIN, min(SCORE_MAX, s))
-
-
 def _merged_asr(seg, utterances) -> str:
     words = [u.text for u in utterances
              if u.t_end > seg.t_start and u.t_start < seg.t_end]
@@ -200,91 +206,6 @@ def _normalise_pins(cited: list[str], version_by_id: dict[str, int]) -> list[str
             seen.add(pin)
             pins.append(pin)
     return pins
-
-
-def _as_num(x):
-    """Coerce to float for ordered comparison; bools/non-numerics -> None."""
-    if isinstance(x, bool):
-        return None
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_bool(x):
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        return x.strip().lower() in ("true", "yes", "1")
-    if isinstance(x, (int, float)):
-        return bool(x)
-    return None
-
-
-def _val_eq(a, b) -> bool:
-    """Type-robust equality: bool vs "true"/1, numeric vs "3", else case-fold str."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        ba, bb = _as_bool(a), _as_bool(b)
-        return ba is not None and ba == bb
-    na, nb = _as_num(a), _as_num(b)
-    if na is not None and nb is not None:
-        return na == nb
-    return str(a).strip().lower() == str(b).strip().lower()
-
-
-def _ordinal_rank(keys: list, val) -> int | None:
-    """Position of `val` in an ascending ordinal value list (case-insensitive)."""
-    target = str(val).strip().lower()
-    for i, k in enumerate(keys):
-        if str(k).strip().lower() == target:
-            return i
-    return None
-
-
-def _match_cond(cond: dict, values: dict, order: dict | None = None) -> bool:
-    """One decision-tree condition against the extracted attribute values.
-
-    `order` maps an ordinal attribute name to its ascending value keys, so `>=`
-    / `<=` on a non-numeric ordinal compares by position in that order."""
-    attr = cond.get("attribute")
-    op = cond.get("op")
-    target = cond.get("value")
-    present = attr in values and values.get(attr) is not None
-    if op == "present":
-        return present
-    if not present:
-        return False
-    v = values.get(attr)
-    if op == "==":
-        return _val_eq(v, target)
-    if op in (">=", "<="):
-        a, b = _as_num(v), _as_num(target)
-        if a is None or b is None:  # non-numeric -> fall back to ordinal ranking
-            keys = (order or {}).get(attr)
-            if not keys:
-                return False
-            a, b = _ordinal_rank(keys, v), _ordinal_rank(keys, target)
-            if a is None or b is None:
-                return False
-        return a >= b if op == ">=" else a <= b
-    if op == "in":
-        opts = target if isinstance(target, (list, tuple, set)) else [target]
-        return any(_val_eq(v, o) for o in opts)
-    return False
-
-
-def _apply_decision_tree(rules: list, default: int, values: dict,
-                         order: dict | None = None) -> tuple[int, dict | None]:
-    """Evaluate a priority-ordered decision tree against extracted attribute
-    values. First rule whose every `when` condition matches wins; otherwise the
-    default. `order` supplies ascending value keys for ordinal attributes so
-    rules can compare with `>=`. Returns (clamped score, matched rule | None)."""
-    for rule in rules or []:
-        conds = rule.get("when") or []
-        if all(_match_cond(c, values, order) for c in conds):
-            return _clamp(rule.get("score", default)), rule
-    return _clamp(default), None
 
 
 def _attr_value(v):
@@ -641,8 +562,10 @@ def _build_label(seg, cat, score, trajectory, matched, defs, rule_node,
     evidence (source judge/extract); unselected/empty ones are stored with an
     EMPTY value (value="", evidence=None, source judge/unselected) so
     considered-and-empty is distinguishable downstream. Cited pins = all attr-def
-    nodes + the rule node; tool_trace holds the decision trajectory; rationale is
-    the matched-rule note (as today)."""
+    nodes + the rule node; rationale is the matched-rule note. No per-label
+    tool_trace is stored — the fired rule is re-derived from evidence_attributes
+    (`tools.tracking.segments_for_rule`). `trajectory`/`matched` still drive the
+    rationale + score here."""
     evidence: list[Attribute] = []
     for name in idx["names"]:
         d = idx["def_by_name"][name]
@@ -674,7 +597,7 @@ def _build_label(seg, cat, score, trajectory, matched, defs, rule_node,
     return Label(
         label_id="", segment_id=seg.segment_id, category=cat, score=score,
         rationale=rationale, cited_policy_ids=cited, evidence_attributes=evidence,
-        tool_trace=[{"decision": trajectory}])
+        tool_trace=[])
 
 
 def _judge_pipeline(orch, state, seg, asr, frames, attr_cats, cat_defs, cat_rule):
@@ -762,7 +685,7 @@ def _build_bootstrap_label(seg, cat, score, rationale, cited, defs, idx,
     holistic score (no decision tree ran). Every defined attribute is
     represented — extracted ones with value + evidence (source judge/extract),
     ones the model dropped stored EMPTY (source judge/unselected). This label is
-    one CART training row: attribute vector -> score."""
+    one CART training row: attribute vector -> score. No tool_trace is stored."""
     evidence: list[Attribute] = []
     for name in idx["names"]:
         d = idx["def_by_name"][name]
@@ -778,12 +701,10 @@ def _build_bootstrap_label(seg, cat, score, rationale, cited, defs, idx,
                 key=name, value="", layer=AttributeLayer.POLICY,
                 source="judge/unselected", evidence=None,
                 policy_version=d.version))
-    decision = {"category": cat, "mode": "bootstrap_free", "score": score,
-                "extracted": {n: o.get("value") for n, o in extracted.items()}}
     return Label(
         label_id="", segment_id=seg.segment_id, category=cat, score=score,
         rationale=rationale, cited_policy_ids=cited, evidence_attributes=evidence,
-        tool_trace=[{"decision": decision}])
+        tool_trace=[])
 
 
 def _judge_bootstrap_attrs(orch, state, seg, asr, frames, cats, cat_defs,
@@ -905,18 +826,18 @@ def _judge_holistic(orch, state, seg, asr, frames, cats, policies, precedents,
             continue
         score = _clamp(j.get("score"))
         rationale = j.get("rationale", "") or ""
-        decision = {"category": cat, "mode": "holistic", "score": score}
+        # Weak precedent-divergence check: note in the rationale when this score
+        # diverges from every similar-shot precedent (retained for human triage).
         prec_scores = [pl["score"] for pr in seg_prec for pl in pr["labels"]
                        if pl.get("category") == cat and pl.get("score") is not None]
         if prec_scores and all(abs(score - ps) >= 2 for ps in prec_scores):
-            decision["precedent_divergence"] = prec_scores
             rationale += " (diverges from precedent; retained for human triage)"
         drafts.append(Label(
             label_id="", segment_id=seg.segment_id, category=cat, score=score,
             rationale=rationale, evidence_attributes=pattrs,
             cited_policy_ids=_normalise_pins(
                 list(j.get("cited_policy_ids") or []), version_by_id),
-            confidence=j.get("confidence"), tool_trace=[{"decision": decision}]))
+            confidence=j.get("confidence"), tool_trace=[]))
     return drafts, proposals
 
 
@@ -957,9 +878,9 @@ def _side_fx(state: LabellingState) -> dict:
 def _commit(state: LabellingState) -> dict:
     """Persist labels, refresh the rolling carry-over, advance the cursor.
 
-    A label's audit trail is its evidence_attributes + cited_policy_ids + the
-    compact decision entry set in JUDGE; the per-stage tool_trace dump is no
-    longer merged in here."""
+    A label's audit trail is its evidence_attributes + cited_policy_ids +
+    rationale (no per-label tool_trace is stored); the per-stage tool_trace dump
+    is not merged in here."""
     drafts = state.get("draft_labels", [])
     window = state.get("window", [])
     used_ids = [s.segment_id for s in window]
