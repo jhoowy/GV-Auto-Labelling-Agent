@@ -181,19 +181,51 @@ def _tree_to_rules(clf, feature_order, encoders, X) -> tuple[list[dict], int]:
 # --------------------------------------------------------------------------- #
 # training
 # --------------------------------------------------------------------------- #
-def _gather_rows(category, feature_order, encoders):
+def bootstrap_train_video_ids() -> list[str]:
+    """Video ids tagged `metadata_json.split == 'bootstrap_train'` — the training
+    split held apart from the eval videos. Pass to `train_all(video_ids=...)`."""
+    from db import SessionLocal
+    from sqlalchemy import text
+
+    with SessionLocal() as s:
+        rows = s.execute(
+            text("select video_id from videos "
+                 "where metadata_json->>'split' = 'bootstrap_train'")
+        ).all()
+    return [r[0] for r in rows]
+
+
+def _segments_for_videos(video_ids) -> set[str]:
+    """Segment ids belonging to the given videos (to scope training to a split,
+    e.g. the 100 `bootstrap_train` videos held apart from the eval set)."""
+    from db import SessionLocal
+    from sqlalchemy import text
+
+    with SessionLocal() as s:
+        rows = s.execute(
+            text("select segment_id from segments where video_id = any(:v)"),
+            {"v": list(video_ids)},
+        ).all()
+    return {r[0] for r in rows}
+
+
+def _gather_rows(category, feature_order, encoders, video_ids=None):
     """Bootstrap-label training rows for a category: each attribute-path label ->
     (integer-encoded attribute vector, clamped score). Only labels carrying the
     defined attributes in `evidence_attributes` (i.e. the bootstrap attr path,
-    not pure holistic) qualify. Read-only over `storage.list_labels`."""
+    not pure holistic) qualify. When `video_ids` is given, only labels from those
+    videos' segments are used (training set / split scoping). Read-only."""
     from tools import storage
 
     cat = getattr(category, "value", category)
     fset = set(feature_order)
+    allowed = _segments_for_videos(video_ids) if video_ids is not None else None
     X: list[list[int]] = []
     y: list[int] = []
     for lbl in storage.list_labels():
         if getattr(lbl.category, "value", lbl.category) != cat:
+            continue
+        if allowed is not None and lbl.segment_id not in allowed:
             continue
         ev = {a.key: a.value for a in lbl.evidence_attributes}
         if not (fset & set(ev)):  # not an attribute-path label -> skip
@@ -203,8 +235,11 @@ def _gather_rows(category, feature_order, encoders):
     return X, y
 
 
-def train_decision_tree(category) -> dict:
+def train_decision_tree(category, video_ids=None) -> dict:
     """Learn one category's decision tree from bootstrap labels and upsert it.
+
+    `video_ids` (optional) scopes training to those videos' labels — pass the
+    `bootstrap_train` split so the held-out eval videos never leak into the tree.
 
     Gathers attribute-vector -> score rows, fits
     `DecisionTreeClassifier(max_depth=4, min_samples_leaf=2, random_state=0)`,
@@ -224,7 +259,7 @@ def train_decision_tree(category) -> dict:
         return {"category": cat, "status": "no_attributes"}
 
     feature_order, encoders = _encoders_from_defs(defs)
-    X, y = _gather_rows(cat, feature_order, encoders)
+    X, y = _gather_rows(cat, feature_order, encoders, video_ids)
 
     if len(X) < _MIN_ROWS:
         log.info("tree_train: %s has %d row(s) (<%d); skipping",
@@ -248,11 +283,13 @@ def train_decision_tree(category) -> dict:
             "attributes": feature_order}
 
 
-def train_all(categories=None) -> dict:
+def train_all(categories=None, video_ids=None) -> dict:
     """Learn decision trees for every active category (or the given subset).
 
-    Categories default to the policy config's active set. One category's failure
-    is logged and recorded, never aborting the run. Returns {category: summary}."""
+    Categories default to the policy config's active set. `video_ids` scopes
+    training to a video split (e.g. the `bootstrap_train` set) for every
+    category. One category's failure is logged and recorded, never aborting the
+    run. Returns {category: summary}."""
     if categories is None:
         from schemas.enums import Category
 
@@ -263,7 +300,7 @@ def train_all(categories=None) -> dict:
     for c in categories:
         cat = getattr(c, "value", c)
         try:
-            out[cat] = train_decision_tree(cat)
+            out[cat] = train_decision_tree(cat, video_ids)
         except Exception as e:  # noqa: BLE001 - one category must not abort the run
             log.warning("tree_train: training failed for %s (%s)", cat, e)
             out[cat] = {"category": cat, "status": "error", "error": str(e)}
