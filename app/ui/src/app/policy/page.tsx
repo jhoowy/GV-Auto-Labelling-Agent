@@ -258,10 +258,25 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
     ? decisionNode!.structured_data.rules
     : [];
 
-  // Clicking a decision node selects a rule; its condition attributes light up
-  // the matching attribute dictionary cards.
+  // Attribute nodes drive the master-detail block: the LEFT lists them as a
+  // schema at a glance, the RIGHT shows the selected one's full detail.
+  const attrNodes = roots.filter((n) => n.type === "attribute");
+
+  // Which attribute's detail the right panel shows.
+  const [selectedAttr, setSelectedAttr] = useState<string | null>(null);
+  // A decision-tree rule selection: highlights the attrs it reads (left) and
+  // tracks the segments it labelled (right).
   const [selectedRule, setSelectedRule] = useState<number | null>(null);
-  useEffect(() => setSelectedRule(null), [category]);
+  // A value within the selected attribute whose labelled segments are tracked.
+  const [trackValue, setTrackValue] = useState<string | null>(null);
+
+  // Default to the first attribute once policies load (or after a category swap).
+  useEffect(() => {
+    if (selectedAttr == null && attrNodes.length > 0) {
+      setSelectedAttr(attrKey(attrNodes[0]));
+    }
+  }, [attrNodes, selectedAttr]);
+
   const highlighted = useMemo(
     () =>
       new Set<string>(
@@ -272,6 +287,33 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
     [selectedRule, rules],
   );
 
+  // Clicking a rule: track its segments, highlight the attrs its conditions read,
+  // and pull the first referenced attribute into the detail panel.
+  function onSelectRule(i: number) {
+    setSelectedRule((cur) => {
+      const next = cur === i ? null : i;
+      if (next != null) {
+        setTrackValue(null);
+        const refs = ruleAttrs(rules[next]);
+        if (refs.length > 0) setSelectedAttr(refs[0]);
+      }
+      return next;
+    });
+  }
+  // Clicking an attribute row: show its detail; drop any active tracking.
+  function onSelectAttr(name: string) {
+    setSelectedAttr(name);
+    setTrackValue(null);
+    setSelectedRule(null);
+  }
+  // Clicking a value in the detail table: track that value's segments.
+  function onTrackValue(v: string) {
+    setTrackValue((cur) => (cur === v ? null : v));
+    setSelectedRule(null);
+  }
+
+  const selectedNode = attrNodes.find((n) => attrKey(n) === selectedAttr) ?? null;
+
   return (
     <section>
       <h2>Policy tree — {categoryLabel(category)}</h2>
@@ -281,8 +323,9 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
         empty={roots.length === 0}
         emptyText="No policy nodes for this category."
       >
+        {/* Scoring rubric + edge-case rules stay as plain node cards. */}
         <div className="grid" style={{ gap: 16 }}>
-          {TYPE_GROUPS.map((g) => {
+          {TYPE_GROUPS.filter((g) => g.type !== "attribute").map((g) => {
             const groupNodes = roots.filter((n) => n.type === g.type);
             if (groupNodes.length === 0) return null;
             return (
@@ -290,14 +333,7 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
                 <h3>{g.label}</h3>
                 <div className="grid" style={{ gap: 8 }}>
                   {groupNodes.map((n) => (
-                    <PolicyNode
-                      key={n.policy_id}
-                      node={n}
-                      depth={0}
-                      highlighted={highlighted}
-                      category={category}
-                      lang={lang}
-                    />
+                    <PolicyNode key={n.policy_id} node={n} depth={0} />
                   ))}
                 </div>
               </div>
@@ -307,43 +343,72 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
           {roots
             .filter((n) => !TYPE_GROUPS.some((g) => g.type === n.type))
             .map((n) => (
-              <PolicyNode
-                key={n.policy_id}
-                node={n}
-                depth={0}
-                highlighted={highlighted}
-                category={category}
-                lang={lang}
-              />
+              <PolicyNode key={n.policy_id} node={n} depth={0} />
             ))}
         </div>
-        <DecisionTreeDiagram
-          node={decisionNode}
-          selected={selectedRule}
-          onSelect={(i) => setSelectedRule((cur) => (cur === i ? null : i))}
-          lang={lang}
-        />
-        {/* Selecting a rule also lists the segments it labelled. */}
-        {selectedRule != null && (
-          <SegmentTrackPanel
-            key={`${category}-rule-${selectedRule}`}
-            title={`Segments labelled via rule #${selectedRule + 1}`}
-            fetcher={() => getRuleSegments(category, selectedRule)}
-            onClose={() => setSelectedRule(null)}
-          />
-        )}
+
+        {/* ── Attribute definitions: master (left schema) / detail (right) ── */}
+        <div className="attr-md">
+          <div className="attr-md-left">
+            <h3>Attribute definitions</h3>
+            {attrNodes.length === 0 ? (
+              <div className="state">No attributes for this category.</div>
+            ) : (
+              <div className="attr-schema">
+                {attrNodes.map((n) => {
+                  const name = attrKey(n);
+                  return (
+                    <AttributeSchemaRow
+                      key={n.policy_id}
+                      sd={n.structured_data}
+                      attr={name}
+                      selected={selectedAttr === name}
+                      highlighted={highlighted.has(name)}
+                      onSelect={() => onSelectAttr(name)}
+                    />
+                  );
+                })}
+              </div>
+            )}
+            {/* The vertical decision-tree cascade stays below the schema list. */}
+            <DecisionTreeDiagram
+              node={decisionNode}
+              selected={selectedRule}
+              onSelect={onSelectRule}
+              lang={lang}
+            />
+          </div>
+          <div className="attr-md-right">
+            <AttributeDetail
+              node={selectedNode}
+              category={category}
+              lang={lang}
+              trackValue={trackValue}
+              onTrackValue={onTrackValue}
+              onClearValue={() => setTrackValue(null)}
+            />
+            {/* Selecting a rule lists the segments it labelled, in the same panel. */}
+            {selectedRule != null && (
+              <SegmentTrackPanel
+                key={`${category}-rule-${selectedRule}`}
+                title={`Segments labelled via rule #${selectedRule + 1}`}
+                fetcher={() => getRuleSegments(category, selectedRule)}
+                onClose={() => setSelectedRule(null)}
+              />
+            )}
+          </div>
+        </div>
       </AsyncState>
     </section>
   );
 }
 
-// ── Attribute dictionary ──────────────────────────────────────────────────
-// A collapsible per-attribute block (dt-labeling `details.signals` style). The
-// SUMMARY line stays scannable — name + value_type + its value keys as compact
-// chips — so a reviewer sees the whole attribute STRUCTURE at a glance; the
-// expanded body carries the detail (guidelines + a values table with value ·
-// label · description · rules · examples). Ordinal attributes are indexed so
-// the `>=` ordering is visible. Auto-expands when highlighted by a rule click.
+// ── Attribute dictionary (master-detail) ──────────────────────────────────
+// The LEFT column is a schema at a glance: one selectable row per attribute
+// showing name + value_type + its value keys as compact chips (no long text).
+// The RIGHT column (`AttributeDetail`) renders the selected attribute's full
+// detail — guidelines + a values table with value · label · description ·
+// rules · examples — and hosts the #14 value→segments tracking inline.
 const OP_LABEL: Record<string, string> = {
   "==": "=",
   ">=": "≥",
@@ -368,35 +433,35 @@ function summaryKeys(sd: any): string[] {
   return values.map((v) => String((v && typeof v === "object" ? v.value : v) ?? ""));
 }
 
-function AttributeBody({
+// LEFT: one compact, selectable row — name + a value_type badge + its value
+// keys as small chips. This is the schema at a glance; no long descriptions.
+// `highlighted` marks a row whose attribute the selected decision-rule reads.
+function AttributeSchemaRow({
   sd,
-  category,
   attr,
-  highlight,
-  lang,
+  selected,
+  highlighted,
+  onSelect,
 }: {
   sd: any;
-  category: Category;
   attr: string;
-  highlight: boolean;
-  lang: Lang;
+  selected: boolean;
+  highlighted: boolean;
+  onSelect: () => void;
 }) {
-  // Korean payload for this attribute, if translated (structured_data.i18n.ko).
-  const ko = koOf(sd);
-  // The attribute value whose labelled segments are currently expanded.
-  const [active, setActive] = useState<string | null>(null);
-  // Collapsed by default; a rule click (`highlight`) auto-opens this attribute.
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (highlight) setOpen(true);
-  }, [highlight]);
   if (!sd || typeof sd !== "object") return null;
-
   const keys = summaryKeys(sd);
-  const summary = (
-    <summary>
-      <span className="sig-name mono">{attr}</span>
-      <Badge tone="gray">{String(sd.value_type ?? sd.kind ?? "—")}</Badge>
+  return (
+    <button
+      type="button"
+      className={`attr-row${selected ? " active" : ""}${highlighted ? " hot" : ""}`}
+      aria-pressed={selected}
+      onClick={onSelect}
+    >
+      <span className="attr-row-head">
+        <span className="sig-name mono">{attr}</span>
+        <Badge tone="gray">{String(sd.value_type ?? sd.kind ?? "—")}</Badge>
+      </span>
       <span className="sig-keys">
         {keys.map((k, i) => (
           <span key={i} className="sig-chip">
@@ -404,49 +469,91 @@ function AttributeBody({
           </span>
         ))}
       </span>
-    </summary>
+    </button>
+  );
+}
+
+// RIGHT: the selected attribute's full detail — guidelines + a values table
+// (value · label · description · per-value rules · examples), EN/KO applied.
+// Clicking a value tracks its labelled segments (#14) inline below the table.
+function AttributeDetail({
+  node,
+  category,
+  lang,
+  trackValue,
+  onTrackValue,
+  onClearValue,
+}: {
+  node: Policy | null;
+  category: Category;
+  lang: Lang;
+  trackValue: string | null;
+  onTrackValue: (v: string) => void;
+  onClearValue: () => void;
+}) {
+  if (!node) {
+    return (
+      <div className="attr-detail">
+        <div className="muted small">Select an attribute to see its detail.</div>
+      </div>
+    );
+  }
+  const sd = node.structured_data;
+  const attr = attrKey(node);
+  // Korean payload for this attribute, if translated (structured_data.i18n.ko).
+  const ko = koOf(sd);
+  if (!sd || typeof sd !== "object") {
+    return (
+      <div className="attr-detail">
+        <div className="attr-detail-head">
+          <span className="sig-name mono">{attr}</span>
+        </div>
+        <div className="muted small">No structured detail for this attribute.</div>
+      </div>
+    );
+  }
+
+  const head = (
+    <div className="attr-detail-head">
+      <span className="sig-name mono">{attr}</span>
+      <Badge tone="gray">{String(sd.value_type ?? sd.kind ?? "—")}</Badge>
+    </div>
   );
 
   if (sd.kind === "term_levels" && sd.levels && typeof sd.levels === "object") {
     const levels = Object.entries(sd.levels as Record<string, unknown>);
     return (
-      <details
-        className="signals"
-        open={open}
-        onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
-      >
-        {summary}
-        <div className="sig-body">
-          <div className="muted small">term levels — score band → terms</div>
-          <div className="attr-table-wrap">
-            <table className="attr-table">
-              <thead>
-                <tr>
-                  <th>level</th>
-                  <th>terms</th>
-                </tr>
-              </thead>
-              <tbody>
-                {levels.map(([lvl, terms]) => {
-                  const n = Number(lvl);
-                  return (
-                    <tr key={lvl}>
-                      <td>
-                        <ScoreBadge score={Number.isFinite(n) ? n : 0} />
-                      </td>
-                      <td className="mono small">
-                        {(Array.isArray(terms) ? terms : [])
-                          .map((t) => String(t))
-                          .join(", ")}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+      <div className="attr-detail">
+        {head}
+        <div className="muted small">term levels — score band → terms</div>
+        <div className="attr-table-wrap">
+          <table className="attr-table">
+            <thead>
+              <tr>
+                <th>level</th>
+                <th>terms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {levels.map(([lvl, terms]) => {
+                const n = Number(lvl);
+                return (
+                  <tr key={lvl}>
+                    <td>
+                      <ScoreBadge score={Number.isFinite(n) ? n : 0} />
+                    </td>
+                    <td className="mono small">
+                      {(Array.isArray(terms) ? terms : [])
+                        .map((t) => String(t))
+                        .join(", ")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-      </details>
+      </div>
     );
   }
 
@@ -454,94 +561,78 @@ function AttributeBody({
   const values: any[] = Array.isArray(sd.values) ? sd.values : [];
   const ordinal = sd.value_type === "ordinal";
   return (
-    <details
-      className="signals"
-      open={open}
-      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
-    >
-      {summary}
-      <div className="sig-body">
-        {sd.guidelines && (
-          <p className="attr-guide small">{tr(lang, ko?.guidelines, sd.guidelines)}</p>
-        )}
-        {values.length > 0 && (
-          <div className="attr-table-wrap">
-            <table className="attr-table">
-              <thead>
-                <tr>
-                  {ordinal && <th>#</th>}
-                  <th>value</th>
-                  <th>label</th>
-                  <th>description</th>
-                  <th>rules</th>
-                  <th>examples</th>
-                </tr>
-              </thead>
-              <tbody>
-                {values.map((v, i) => {
-                  const obj = v && typeof v === "object" ? v : { value: v };
-                  const ex = Array.isArray(obj.examples) ? obj.examples : [];
-                  const rules = Array.isArray(obj.rules) ? obj.rules : [];
-                  const valStr = String(obj.value ?? "");
-                  // Korean overrides for this value (value key itself is never translated).
-                  const koVal = ko?.values?.[valStr];
-                  const dispRules = trRules(lang, koVal?.rules, rules);
-                  return (
-                    <tr key={i}>
-                      {ordinal && <td className="muted mono">{i}</td>}
-                      <td className="mono">
-                        {/* Click a value to see the segments labelled with it. */}
-                        <button
-                          onClick={() =>
-                            setActive((cur) => (cur === valStr ? null : valStr))
-                          }
-                          title="Show segments labelled with this value"
-                          style={{
-                            background: "none",
-                            border: "none",
-                            padding: 0,
-                            cursor: "pointer",
-                            font: "inherit",
-                            color: "inherit",
-                            textDecoration: "underline dotted",
-                          }}
-                        >
-                          {valStr}
-                        </button>
-                      </td>
-                      <td>{tr(lang, koVal?.label, obj.label)}</td>
-                      <td className="small">{tr(lang, koVal?.description, obj.description)}</td>
-                      <td className="small">
-                        {dispRules.length > 0 ? (
-                          <ul style={{ margin: 0, paddingLeft: 16, display: "grid", gap: 3, maxWidth: 360 }}>
-                            {dispRules.map((r: string, j: number) => (
-                              <li key={j}>{r}</li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td className="small muted">
-                        {ex.map((e: any) => String(e)).join("; ")}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {active != null && (
-          <SegmentTrackPanel
-            key={`${category}-${attr}-${active}`}
-            title={`Segments where ${attr} = ${active}`}
-            fetcher={() => getAttributeValueSegments(category, attr, active)}
-            onClose={() => setActive(null)}
-          />
-        )}
-      </div>
-    </details>
+    <div className="attr-detail">
+      {head}
+      {sd.guidelines && (
+        <p className="attr-guide small">{tr(lang, ko?.guidelines, sd.guidelines)}</p>
+      )}
+      {values.length > 0 && (
+        <div className="attr-table-wrap">
+          <table className="attr-table">
+            <thead>
+              <tr>
+                {ordinal && <th>#</th>}
+                <th>value</th>
+                <th>label</th>
+                <th>description</th>
+                <th>rules</th>
+                <th>examples</th>
+              </tr>
+            </thead>
+            <tbody>
+              {values.map((v, i) => {
+                const obj = v && typeof v === "object" ? v : { value: v };
+                const ex = Array.isArray(obj.examples) ? obj.examples : [];
+                const rules = Array.isArray(obj.rules) ? obj.rules : [];
+                const valStr = String(obj.value ?? "");
+                // Korean overrides for this value (value key itself is never translated).
+                const koVal = ko?.values?.[valStr];
+                const dispRules = trRules(lang, koVal?.rules, rules);
+                return (
+                  <tr key={i} className={trackValue === valStr ? "attr-row-tracked" : undefined}>
+                    {ordinal && <td className="muted mono">{i}</td>}
+                    <td className="mono">
+                      {/* Click a value to see the segments labelled with it. */}
+                      <button
+                        className="attr-val-btn"
+                        onClick={() => onTrackValue(valStr)}
+                        title="Show segments labelled with this value"
+                      >
+                        {valStr}
+                      </button>
+                    </td>
+                    <td>{tr(lang, koVal?.label, obj.label)}</td>
+                    <td className="small">{tr(lang, koVal?.description, obj.description)}</td>
+                    <td className="small">
+                      {dispRules.length > 0 ? (
+                        <ul className="attr-rules">
+                          {dispRules.map((r: string, j: number) => (
+                            <li key={j}>{r}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td className="small muted">
+                      {ex.map((e: any) => String(e)).join("; ")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {trackValue != null && (
+        <SegmentTrackPanel
+          key={`${category}-${attr}-${trackValue}`}
+          title={`Segments where ${attr} = ${trackValue}`}
+          fetcher={() => getAttributeValueSegments(category, attr, trackValue)}
+          onClose={onClearValue}
+        />
+      )}
+    </div>
   );
 }
 
@@ -829,25 +920,14 @@ function DecisionTreeDiagram({
   );
 }
 
-function PolicyNode({
-  node,
-  depth,
-  highlighted,
-  category,
-  lang,
-}: {
-  node: Policy;
-  depth: number;
-  highlighted: Set<string>;
-  category: Category;
-  lang: Lang;
-}) {
+// A plain policy-node card (scoring rubric / edge-case rule / other). Attribute
+// nodes are rendered by the master-detail block above, not here.
+function PolicyNode({ node, depth }: { node: Policy; depth: number }) {
   const isAttr = node.type === "attribute";
   const key = attrKey(node);
-  const hot = isAttr && highlighted.has(key);
   return (
     <div style={{ marginLeft: depth * 20 }}>
-      <div className={`card${hot ? " highlight" : ""}`}>
+      <div className="card">
         <div className="row spread">
           <div className="row">
             <Badge tone={TYPE_TONE[node.type] ?? "gray"}>{node.type}</Badge>
@@ -861,28 +941,13 @@ function PolicyNode({
           <Badge tone={node.status === "active" ? "ok" : "gray"}>{node.status}</Badge>
         </div>
         <p style={{ margin: "8px 0 0" }}>{node.text}</p>
-        {isAttr && (
-          <AttributeBody
-            sd={node.structured_data}
-            category={category}
-            attr={key}
-            highlight={hot}
-            lang={lang}
-          />
-        )}
         {node.structured_ref && (
           <div className="muted small mono">structured_ref: {node.structured_ref}</div>
         )}
       </div>
       {node.children?.map((c) => (
         <div key={c.policy_id} style={{ marginTop: 8 }}>
-          <PolicyNode
-            node={c}
-            depth={depth + 1}
-            highlighted={highlighted}
-            category={category}
-            lang={lang}
-          />
+          <PolicyNode node={c} depth={depth + 1} />
         </div>
       ))}
     </div>
