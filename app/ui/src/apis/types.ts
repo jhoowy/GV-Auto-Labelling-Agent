@@ -102,7 +102,6 @@ export interface AttributeDef {
   value_type: "categorical" | "ordinal" | "boolean";
   values?: AttributeValue[];
   guidelines?: string;
-  scores_informed?: number[];
 }
 export interface TermLevels {
   kind: "term_levels";

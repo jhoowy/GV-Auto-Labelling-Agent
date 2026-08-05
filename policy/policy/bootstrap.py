@@ -164,7 +164,7 @@ def _author_prompt(cat: str, rubric: str) -> str:
         ' "attributes": [ {"name":"...", "value_type":'
         '"categorical|ordinal|boolean", "values":[ {"value":"...","label":'
         '"...","description":"...","examples":["..."],"rules":["..."]} ], '
-        '"guidelines":"...", "scores_informed":[<ints>]} ],\n'
+        '"guidelines":"..."} ],\n'
         ' "decision_tree": {"default":0, "rules":[ {"when":[ {"attribute":'
         '"...","op":"==|>=|<=|in|present","value":<val>} ], "score":<int>, '
         '"note":"..."} ]} }\n\n'
@@ -203,16 +203,6 @@ def _as_int(v, default: int = 0) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
-
-
-def _as_int_list(v) -> list[int]:
-    """Valid 0..5 score bands from a loose list; drops non-ints and negatives."""
-    out: list[int] = []
-    for x in v if isinstance(v, list) else []:
-        i = _as_int(x, -1)
-        if i >= 0:
-            out.append(i)
-    return out
 
 
 def _as_dicts(v) -> list[dict]:
@@ -262,7 +252,6 @@ def author_category_policy(category, *, policy_llm=None) -> dict:
             cat, name,
             value_type=a.get("value_type") or a.get("type") or "categorical",
             guidelines=a.get("guidelines") or a.get("description") or "",
-            scores_informed=_as_int_list(a.get("scores_informed")),
             values=a.get("values") or a.get("enum"),
         )
         names.append(name)

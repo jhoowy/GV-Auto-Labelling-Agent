@@ -452,7 +452,6 @@ function AttributeBody({
 
   // attribute_def (default shape)
   const values: any[] = Array.isArray(sd.values) ? sd.values : [];
-  const scores: any[] = Array.isArray(sd.scores_informed) ? sd.scores_informed : [];
   const ordinal = sd.value_type === "ordinal";
   return (
     <details
@@ -462,14 +461,6 @@ function AttributeBody({
     >
       {summary}
       <div className="sig-body">
-        {scores.length > 0 && (
-          <span className="row" style={{ gap: 4 }}>
-            <span className="muted small">informs</span>
-            {scores.map((s, i) => (
-              <ScoreBadge key={i} score={Number(s)} />
-            ))}
-          </span>
-        )}
         {sd.guidelines && (
           <p className="attr-guide small">{tr(lang, ko?.guidelines, sd.guidelines)}</p>
         )}
@@ -554,188 +545,141 @@ function AttributeBody({
   );
 }
 
-// ── Decision rule tree diagram (dt-labeling top-down tree) ────────────────
+// ── Decision rule tree diagram (vertical priority cascade) ────────────────
 // The DECISION_RULE node is a priority-ordered rule list (first match wins,
-// else `default`). We render it as the equivalent branching tree, mirroring
-// dt-labeling's policy-edit tree: each rule is a question node listing its
-// `when` conditions; YES → a score-coloured leaf (score + note); NO → the next
-// rule down; the final NO → the `default` leaf. Top-down tidy layout with
-// bézier yes/no edges. Clicking a rule question OR its YES leaf selects that
-// rule — preserving the #14 click-to-segments + node→attribute highlight.
+// else `default`). We render it as a single narrow top-to-bottom column: each
+// rule node branches match → a score-coloured leaf, else → the next rule below,
+// terminating in the default leaf at the bottom. Clicking a rule node selects
+// it — preserving the #14 click-to-segments + node→attribute highlight — and KO
+// rule notes render when the language toggle is set to Korean (#22).
 const DT = {
-  COL_W: 220,
-  NODE_W: 204,
-  LEAF_W: 192,
-  LEAF_H: 66,
-  LEVEL_GAP: 46,
   MARGIN: 24,
+  RULE_W: 320,
+  LEAF_W: 190,
+  COL_GAP: 100,
+  V_GAP: 34,
+  LEAF_H: 66,
 };
 
-function ruleNodeHeight(rule: any): number {
+function ruleHeight(rule: any): number {
   const n = Array.isArray(rule?.when) ? rule.when.length : 0;
-  return Math.max(58, 30 + Math.max(1, n) * 20 + 14);
+  return Math.max(64, 34 + Math.max(1, n) * 22 + 12);
 }
 
-// Bézier edge from a node's bottom-centre to a child's top-centre.
-const edgePath = (x1: number, y1: number, x2: number, y2: number) => {
+const vPath = (x1: number, y1: number, x2: number, y2: number) => {
   const my = (y1 + y2) / 2;
   return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
 };
+const hPath = (x1: number, y1: number, x2: number, y2: number) => {
+  const mx = (x1 + x2) / 2;
+  return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+};
 
-type TreeNode =
-  | {
-      kind: "question";
-      id: string;
-      index: number;
-      rule: any;
-      yes: string;
-      no: string;
-      h: number;
-    }
-  | {
-      kind: "leaf";
-      id: string;
-      index: number | null; // null => the `default` leaf (not a rule)
-      score: number;
-      note?: string;
-      tag: string;
-      h: number;
-    };
-
-type Pos = { cx: number; top: number; slot: number; depth: number; h: number };
-
-// Tidy top-down slot layout (dt-labeling `layoutTree`): terminals take one slot
-// each; a question sits at the mean slot of its yes/no children. A uniform
-// level height keeps rows aligned regardless of per-node height.
-function layoutTree(nodes: Record<string, TreeNode>, root: string) {
-  const pos: Record<string, Pos> = {};
-  let nextSlot = 0;
-  let maxDepth = 0;
-  const walk = (id: string, depth: number): number => {
-    const n = nodes[id];
-    maxDepth = Math.max(maxDepth, depth);
-    if (n.kind !== "question") {
-      pos[id] = { slot: nextSlot++, depth, cx: 0, top: 0, h: n.h };
-      return pos[id].slot;
-    }
-    const a = walk(n.yes, depth + 1);
-    const b = walk(n.no, depth + 1);
-    pos[id] = { slot: (a + b) / 2, depth, cx: 0, top: 0, h: n.h };
-    return pos[id].slot;
-  };
-  walk(root, 0);
-  const maxH = Math.max(DT.LEAF_H, ...Object.values(nodes).map((n) => n.h));
-  const levelH = maxH + DT.LEVEL_GAP;
-  for (const id of Object.keys(pos)) {
-    pos[id].cx = DT.MARGIN + pos[id].slot * DT.COL_W + DT.COL_W / 2;
-    pos[id].top = DT.MARGIN + pos[id].depth * levelH;
-  }
-  return {
-    pos,
-    width: DT.MARGIN * 2 + nextSlot * DT.COL_W,
-    height: DT.MARGIN * 2 + maxDepth * levelH + maxH,
-  };
-}
-
-function Edge({ from, to, answer }: { from: Pos; to: Pos; answer: "yes" | "no" }) {
-  const x1 = from.cx;
-  const y1 = from.top + from.h;
-  const x2 = to.cx;
-  const y2 = to.top;
-  const lx = (x1 + x2) / 2;
-  const ly = (y1 + y2) / 2;
-  const tw = answer.length * 7 + 14;
+function Pill({
+  x,
+  y,
+  text,
+  kind,
+}: {
+  x: number;
+  y: number;
+  text: string;
+  kind: "match" | "else";
+}) {
+  const w = text.length * 6.4 + 16;
   return (
-    <g>
-      <path className="tree-edge" d={edgePath(x1, y1, x2, y2)} />
-      <g className={`tree-edge-label ${answer}`}>
-        <rect x={lx - tw / 2} y={ly - 10} width={tw} height={20} rx={10} />
-        <text x={lx} y={ly + 4} textAnchor="middle">
-          {answer}
-        </text>
-      </g>
+    <g className={`dt-pill ${kind}`}>
+      <rect x={x - w / 2} y={y - 9} width={w} height={18} rx={9} />
+      <text x={x} y={y + 4} textAnchor="middle">
+        {text}
+      </text>
     </g>
   );
 }
 
-function RuleNode({
-  p,
-  node,
-  selected,
-  onClick,
+function LeafNode({
+  x,
+  y,
+  score,
+  note,
+  label,
 }: {
-  p: Pos;
-  node: Extract<TreeNode, { kind: "question" }>;
-  selected: boolean;
-  onClick: () => void;
+  x: number;
+  y: number;
+  score: number;
+  note?: string;
+  label: string;
 }) {
-  const conds: any[] = Array.isArray(node.rule?.when) ? node.rule.when : [];
-  const x = p.cx - DT.NODE_W / 2;
   return (
-    <g className={`tree-q${selected ? " selected" : ""}`} onClick={onClick}>
-      <rect className="tree-q-rect" x={x} y={p.top} width={DT.NODE_W} height={p.h} rx={10} />
-      <foreignObject x={x} y={p.top} width={DT.NODE_W} height={p.h}>
-        <div className="tree-qbox">
-          <div className="tree-q-title">Rule #{node.index + 1}</div>
-          {conds.length === 0 ? (
-            <div className="tree-cond muted">always</div>
-          ) : (
-            conds.map((c, i) => (
-              <div className="tree-cond" key={i}>
-                <span className="tree-attr">{String(c?.attribute ?? "?")}</span>{" "}
-                <span className="tree-op">{OP_LABEL[c?.op] ?? String(c?.op ?? "")}</span>
-                {c?.op !== "present" && (
-                  <span className="tree-val"> {fmtValue(c?.value)}</span>
-                )}
-              </div>
-            ))
-          )}
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={DT.LEAF_W}
+        height={DT.LEAF_H}
+        rx={8}
+        fill={scoreColor(score)}
+      />
+      <foreignObject x={x} y={y} width={DT.LEAF_W} height={DT.LEAF_H}>
+        <div className="dt-leafbox">
+          <div className="dt-leaf-head">
+            <span className="dt-leaf-score">{score}</span>
+            <span className="dt-leaf-tag">{label}</span>
+          </div>
+          {note && <div className="dt-leaf-note">{note}</div>}
         </div>
       </foreignObject>
     </g>
   );
 }
 
-function LeafNode({
-  p,
-  node,
+function RuleNode({
+  x,
+  y,
+  h,
+  index,
+  rule,
   selected,
   onClick,
 }: {
-  p: Pos;
-  node: Extract<TreeNode, { kind: "leaf" }>;
+  x: number;
+  y: number;
+  h: number;
+  index: number;
+  rule: any;
   selected: boolean;
-  onClick?: () => void;
+  onClick: () => void;
 }) {
-  const color = scoreColor(node.score);
-  const x = p.cx - DT.LEAF_W / 2;
-  const clickable = node.index != null;
+  const conds: any[] = Array.isArray(rule?.when) ? rule.when : [];
   return (
-    <g
-      className={`tree-leaf${selected ? " selected" : ""}${clickable ? " pickable" : ""}`}
-      onClick={clickable ? onClick : undefined}
-    >
+    <g className={`dt-node${selected ? " selected" : ""}`} onClick={onClick}>
       <rect
-        className="tree-leaf-rect"
+        className="dt-node-rect"
         x={x}
-        y={p.top}
-        width={DT.LEAF_W}
-        height={p.h}
-        rx={8}
-        style={{
-          stroke: color,
-          fill: `color-mix(in srgb, ${color} 13%, var(--panel))`,
-        }}
+        y={y}
+        width={DT.RULE_W}
+        height={h}
+        rx={10}
       />
-      <foreignObject x={x} y={p.top} width={DT.LEAF_W} height={p.h}>
-        <div className="tree-leafbox">
-          <div className="tree-leaf-head">
-            <span className="tree-leaf-score" style={{ color }}>
-              {node.score}
-            </span>
-            <span className="tree-leaf-tag">{node.tag}</span>
+      <foreignObject x={x} y={y} width={DT.RULE_W} height={h}>
+        <div className="dt-nodebox">
+          <div className="dt-rulehead">
+            <span>Rule #{index + 1}</span>
+            <span className="dt-rulescore">→ score {String(rule?.score ?? "—")}</span>
           </div>
-          {node.note && <div className="tree-leaf-note">{node.note}</div>}
+          {conds.length === 0 ? (
+            <div className="dt-cond muted">always</div>
+          ) : (
+            conds.map((c, i) => (
+              <div className="dt-cond" key={i}>
+                <span className="dt-attr">{String(c?.attribute ?? "?")}</span>{" "}
+                <span className="dt-op">{OP_LABEL[c?.op] ?? String(c?.op ?? "")}</span>
+                {c?.op !== "present" && (
+                  <span className="dt-val"> {fmtValue(c?.value)}</span>
+                )}
+              </div>
+            ))
+          )}
         </div>
       </foreignObject>
     </g>
@@ -763,43 +707,23 @@ function DecisionTreeDiagram({
     ? ko.rules
     : [];
 
-  // Build the branching tree from the priority list: rule i's YES leaf carries
-  // its score/note; its NO points to rule i+1, and the last NO to `default`.
-  const nodes: Record<string, TreeNode> = {};
-  rules.forEach((r, i) => {
-    const score = Number(r?.score ?? 0);
-    const note = tr(lang, koRules[i]?.note, r?.note);
-    nodes[`q${i}`] = {
-      kind: "question",
-      id: `q${i}`,
-      index: i,
-      rule: r,
-      yes: `y${i}`,
-      no: i < rules.length - 1 ? `q${i + 1}` : "def",
-      h: ruleNodeHeight(r),
-    };
-    nodes[`y${i}`] = {
-      kind: "leaf",
-      id: `y${i}`,
-      index: i,
-      score,
-      note: note ? note : undefined,
-      tag: `score ${score}`,
-      h: DT.LEAF_H,
-    };
+  const ruleX = DT.MARGIN;
+  const leafX = ruleX + DT.RULE_W + DT.COL_GAP;
+
+  // Vertical layout: rule nodes stack in the left column, match-leaves sit to
+  // their right, and the else-chain flows straight down to the default leaf.
+  let y = DT.MARGIN;
+  const pos = rules.map((r) => {
+    const h = ruleHeight(r);
+    const p = { y, h };
+    y += Math.max(h, DT.LEAF_H) + DT.V_GAP;
+    return p;
   });
-  nodes["def"] = {
-    kind: "leaf",
-    id: "def",
-    index: null,
-    score: def,
-    note: tr(lang, ko?.default_note, "no rule matched"),
-    tag: "default",
-    h: DT.LEAF_H,
-  };
-  const root = rules.length > 0 ? "q0" : "def";
-  const { pos, width, height } = layoutTree(nodes, root);
-  const all = Object.values(nodes);
+  const defaultY = y;
+  const width = leafX + DT.LEAF_W + DT.MARGIN;
+  const height = defaultY + DT.LEAF_H + DT.MARGIN;
+
+  const elseX = ruleX + DT.RULE_W / 2; // else edges leave the node's bottom-centre
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -811,40 +735,95 @@ function DecisionTreeDiagram({
         </span>
       </div>
       <div className="dt-wrap">
-        <svg className="tree-svg" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-          {/* edges first so the nodes paint over them */}
-          {all.map((n) =>
-            n.kind === "question" ? (
-              <g key={`e-${n.id}`}>
-                <Edge from={pos[n.id]} to={pos[n.yes]} answer="yes" />
-                <Edge from={pos[n.id]} to={pos[n.no]} answer="no" />
-              </g>
-            ) : null,
-          )}
-          {all.map((n) =>
-            n.kind === "question" ? (
-              <RuleNode
-                key={n.id}
-                p={pos[n.id]}
-                node={n}
-                selected={selected === n.index}
-                onClick={() => onSelect(n.index)}
-              />
-            ) : (
+        {rules.length === 0 ? (
+          <div className="state">No rules defined — always scores {def}.</div>
+        ) : (
+          <svg
+            className="dt-svg"
+            width={width}
+            height={height}
+            viewBox={`0 0 ${width} ${height}`}
+          >
+            {/* edges first, then pills, then nodes */}
+            {pos.map((p, i) => {
+              const cy = p.y + p.h / 2;
+              const nextY =
+                i < rules.length - 1 ? pos[i + 1].y : defaultY;
+              const nextX =
+                i < rules.length - 1 ? elseX : ruleX + DT.LEAF_W / 2;
+              return (
+                <g key={`e${i}`}>
+                  <path
+                    className="dt-edge match"
+                    d={hPath(
+                      ruleX + DT.RULE_W,
+                      cy,
+                      leafX,
+                      p.y + DT.LEAF_H / 2,
+                    )}
+                  />
+                  <path
+                    className="dt-edge"
+                    d={vPath(elseX, p.y + p.h, nextX, nextY)}
+                  />
+                </g>
+              );
+            })}
+            {pos.map((p, i) => {
+              const nextY = i < rules.length - 1 ? pos[i + 1].y : defaultY;
+              const cy = p.y + p.h / 2;
+              return (
+                <g key={`p${i}`}>
+                  <Pill
+                    x={(ruleX + DT.RULE_W + leafX) / 2}
+                    y={(cy + p.y + DT.LEAF_H / 2) / 2}
+                    text="match"
+                    kind="match"
+                  />
+                  <Pill
+                    x={elseX}
+                    y={(p.y + p.h + nextY) / 2}
+                    text="else"
+                    kind="else"
+                  />
+                </g>
+              );
+            })}
+            {pos.map((p, i) => (
               <LeafNode
-                key={n.id}
-                p={pos[n.id]}
-                node={n}
-                selected={n.index != null && selected === n.index}
-                onClick={n.index != null ? () => onSelect(n.index as number) : undefined}
+                key={`l${i}`}
+                x={leafX}
+                y={p.y}
+                score={Number(rules[i]?.score ?? 0)}
+                note={tr(lang, koRules[i]?.note, rules[i]?.note) || undefined}
+                label="match"
               />
-            ),
-          )}
-        </svg>
+            ))}
+            <LeafNode
+              x={ruleX}
+              y={defaultY}
+              score={def}
+              label="default"
+              note={tr(lang, ko?.default_note, "no rule matched")}
+            />
+            {pos.map((p, i) => (
+              <RuleNode
+                key={`n${i}`}
+                x={ruleX}
+                y={p.y}
+                h={p.h}
+                index={i}
+                rule={rules[i]}
+                selected={selected === i}
+                onClick={() => onSelect(i)}
+              />
+            ))}
+          </svg>
+        )}
       </div>
       <div className="muted small" style={{ marginTop: 6 }}>
-        Click a rule node (or its matched leaf) to highlight the attribute cards
-        its conditions read and list the segments it labelled.
+        Click a rule node to highlight the attribute cards its conditions read
+        and list the segments it labelled.
       </div>
     </div>
   );
