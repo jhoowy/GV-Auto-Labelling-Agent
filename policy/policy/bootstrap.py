@@ -1,12 +1,15 @@
 """Bootstrap — establish the initial policy set.
 
 Policy is authored **data-independently** by the policy LLM (`gpt-5.6-sol`): a
-category's attribute schema, base decision tree, and refined 0..5 rubric are
-designed from the PEGI seed rubric + a reference signal exemplar + the general-
-signal design principle alone — no collected video segments are consulted.
+category's attribute schema and refined 0..5 rubric are designed from the PEGI
+seed rubric + a reference signal exemplar + the general-signal design principle
+alone — no collected video segments are consulted. The DECISION_RULE tree is NOT
+authored here: it is LEARNED from bootstrap labels via CART (`tools.tree_train`)
+after bootstrap labelling has produced an attribute-vector + free-score training
+set. Authoring only the attributes keeps the tree data-driven, not GPT-guessed.
 
     seed(PEGI -> rubric nodes = v0) -> author(rubric + exemplar + principle)
-    -> upsert refined rubric + ATTRIBUTE nodes + DECISION_RULE tree per category
+    -> upsert refined rubric + ATTRIBUTE nodes per category
 """
 from __future__ import annotations
 
@@ -143,9 +146,9 @@ _AUTHOR_SYS = (
     "You are a content-moderation policy engineer. Working DATA-INDEPENDENTLY "
     "(you are shown no example videos), you design ONE category's labelling "
     "policy from first principles: a small set of GENERAL, observable "
-    "attributes (signals), an attribute-based decision tree mapping their "
-    "values to a 0..5 age score, and a refined 0..5 rubric consistent with "
-    "both. Respond with a single JSON object only, no prose."
+    "attributes (signals) and a refined 0..5 rubric consistent with them. You "
+    "do NOT author a decision tree — the attribute->score mapping is learned "
+    "later from data. Respond with a single JSON object only, no prose."
 )
 
 
@@ -164,22 +167,18 @@ def _author_prompt(cat: str, rubric: str) -> str:
         ' "attributes": [ {"name":"...", "value_type":'
         '"categorical|ordinal|boolean", "values":[ {"value":"...","label":'
         '"...","description":"...","examples":["..."],"rules":["..."]} ], '
-        '"guidelines":"..."} ],\n'
-        ' "decision_tree": {"default":0, "rules":[ {"when":[ {"attribute":'
-        '"...","op":"==|>=|<=|in|present","value":<val>} ], "score":<int>, '
-        '"note":"..."} ]} }\n\n'
+        '"guidelines":"..."} ] }\n\n'
         "Requirements: 4-8 GENERAL attributes; each is a closed-enum "
         "observation (specificity in the values, not the name); ordinal "
-        "attributes list values in ASCENDING order low..high so rules compare "
-        "with >=; boolean attributes omit `values`; each value carries a "
-        "`rules` list of 2-4 concise edge-case notes that disambiguate this "
-        "value from neighbouring ones (e.g. a slot machine briefly visible in "
-        "the background of a non-gambling scene) — the labeller reads these "
-        "when assigning the value; the decision tree is priority-ordered "
-        "(highest score first) "
-        "over ONLY these attributes and their listed values, with band 0 as the "
-        "default; the rubric's bands stay consistent with the attributes and "
-        "tree. Output JSON only."
+        "attributes list values in ASCENDING order low..high so a later tree "
+        "can compare by degree; boolean attributes omit `values`; each value "
+        "carries a `rules` list of 2-4 concise edge-case notes that "
+        "disambiguate this value from neighbouring ones (e.g. a slot machine "
+        "briefly visible in the background of a non-gambling scene) — the "
+        "labeller reads these when assigning the value. Do NOT emit a decision "
+        "tree: the attribute->score mapping is learned from labelled data "
+        "later. The rubric's bands stay consistent with the attributes. Output "
+        "JSON only."
     )
 
 
@@ -196,13 +195,6 @@ def _base_rubric(cat: str) -> str:
     except ValueError:
         text = None
     return text or _scoring_text(cat)
-
-
-def _as_int(v, default: int = 0) -> int:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return default
 
 
 def _as_dicts(v) -> list[dict]:
@@ -222,12 +214,12 @@ def author_category_policy(category, *, policy_llm=None) -> dict:
     category's base PEGI rubric, (b) the reference sexual signal schema as a
     condensed exemplar of well-formed general signals, and (c) the general-
     signal design principle, and asked in ONE JSON call to design: a refined
-    0..5 rubric, 4-8 general closed-enum attributes, and a base decision tree
-    over exactly those attributes. Each piece is applied to the tree — the
-    refined rubric to the `{cat}.scoring` node, each attribute to a `{cat}.attr.
-    <name>` ATTRIBUTE node, and the tree to the `{cat}.rules` DECISION_RULE
-    node. Lenient about the reply shape. Idempotent: upsert bumps node
-    versions, so re-running re-authors in place. Returns a summary."""
+    0..5 rubric and 4-8 general closed-enum attributes. Each piece is applied to
+    the tree — the refined rubric to the `{cat}.scoring` node and each attribute
+    to a `{cat}.attr.<name>` ATTRIBUTE node. The DECISION_RULE tree is NOT
+    authored here; it is learned from bootstrap labels by `tools.tree_train`.
+    Lenient about the reply shape. Idempotent: upsert bumps node versions, so
+    re-running re-authors in place. Returns a summary."""
     cat = getattr(category, "value", category)
     rubric = _base_rubric(cat)
     llm = policy_llm or _get_policy_llm()
@@ -256,37 +248,29 @@ def author_category_policy(category, *, policy_llm=None) -> dict:
         )
         names.append(name)
 
-    # Base decision tree -> the DECISION_RULE node.
-    tree = result.get("decision_tree") or result.get("tree") or {}
-    rules = [r for r in _as_dicts(tree.get("rules")) if r.get("when") is not None]
-    default = _as_int(tree.get("default"), 0)
-    policy_store.upsert_decision_rule(cat, rules, default)
-
-    log.info(
-        "bootstrap: authored %d attribute(s) + %d rule(s) for %s",
-        len(names), len(rules), cat,
-    )
+    # No DECISION_RULE tree is authored: the attribute->score mapping is learned
+    # from bootstrap labels downstream (`tools.tree_train.train_all`).
+    log.info("bootstrap: authored %d attribute(s) for %s", len(names), cat)
     return {
         "category": cat,
         "attributes": names,
-        "n_rules": len(rules),
-        "default": default,
     }
 
 
 def run_bootstrap(video_ids: list[str] | None = None) -> dict:
     """Author the initial policy set DATA-INDEPENDENTLY for every active category.
 
-    No video data is consulted: each category's attribute schema, base decision
-    tree, and refined rubric are designed by the policy LLM (`gpt-5.6-sol`) from
-    the PEGI seed rubric + the reference signal exemplar + the general-signal
-    design principle alone. `video_ids` is accepted but ignored (kept for
-    call-site compatibility).
+    No video data is consulted: each category's attribute schema and refined
+    rubric are designed by the policy LLM (`gpt-5.6-sol`) from the PEGI seed
+    rubric + the reference signal exemplar + the general-signal design principle
+    alone. The DECISION_RULE tree is left for `tools.tree_train` to learn from
+    bootstrap labels. `video_ids` is accepted but ignored (kept for call-site
+    compatibility).
 
     Flow:
       1. SEED: ensure PEGI v0 scoring rubrics exist (the authoring seed).
       2. AUTHOR: per active category, `author_category_policy` designs and
-         upserts the refined rubric + ATTRIBUTE nodes + DECISION_RULE tree.
+         upserts the refined rubric + ATTRIBUTE nodes (no tree).
     Idempotent: upsert bumps each node's version on re-run.
     """
     from models import base_config

@@ -9,8 +9,9 @@ with a restricted tool set. The window slides until all segments are labelled.
   JUDGE     categories with attribute defs + a decision tree run an explicit
             SELECT -> EXTRACT -> DECIDE(+trajectory) -> REVIEW -> STORE pipeline
             per shot (deterministic score from the tree; REVIEW cannot override
-            it); categories with no defs/tree (and all of bootstrap) fall back to
-            holistic multimodal scoring
+            it); in BOOTSTRAP (no tree yet) categories with attribute defs
+            EXTRACT every attribute + assign a FREE holistic score (the CART
+            training set); categories with no defs fall back to holistic scoring
   SIDE_FX   propose_policy_change (queue) — incl. rule-change requests REVIEW
             flags / define_structured_attribute (bootstrap)
   COMMIT    emit labels + update the carry-over rolling summary
@@ -439,10 +440,12 @@ def _judge(state: LabellingState) -> dict:
     DECISION_RULE tree run one explicit SELECT -> EXTRACT -> DECIDE -> REVIEW ->
     STORE pipeline (`_judge_pipeline`): SELECT/REVIEW are single cross-category
     calls, EXTRACT is one call per selected category, DECIDE applies the tree
-    deterministically, and STORE emits one Label per category. Categories with no
-    defs/rules (or any category in bootstrap, which is still discovering the
-    policy) fall back to holistic multimodal scoring. The orchestrator/DB are
-    resolved here, so build_graph() needs no server."""
+    deterministically, and STORE emits one Label per category. In bootstrap no
+    tree exists yet, so categories with attribute defs take the bootstrap attr
+    path (`_judge_bootstrap_attrs`): extract EVERY attribute + a FREE holistic
+    score, forming the CART training set. Categories with no defs (or no rules
+    outside bootstrap) fall back to holistic multimodal scoring. The
+    orchestrator/DB are resolved here, so build_graph() needs no server."""
     from models import get_agent_llm
     from tools import policy_store, retrieval
 
@@ -467,11 +470,19 @@ def _judge(state: LabellingState) -> dict:
                 rule = node
         cat_defs[cat], cat_rule[cat] = defs, rule
 
-    # Attribute-driven needs BOTH defs and a tree; else (and always in bootstrap)
-    # the category keeps holistic scoring so JUDGE still works pre-synthesis.
-    attr_cats = ([] if bootstrap
-                 else [c for c in cats if cat_defs[c] and cat_rule[c]])
-    fallback_cats = [c for c in cats if c not in attr_cats]
+    # Attribute-driven (tree) needs BOTH defs and a tree. In bootstrap no tree
+    # exists yet (it is LEARNED from these labels later), so categories WITH
+    # attribute defs take the bootstrap attr path — extract EVERY attribute + a
+    # FREE holistic score — building the CART training set. Categories without
+    # defs keep pure holistic scoring so JUDGE still works pre-synthesis.
+    if bootstrap:
+        attr_cats: list[str] = []
+        boot_attr_cats = [c for c in cats if cat_defs[c]]
+    else:
+        attr_cats = [c for c in cats if cat_defs[c] and cat_rule[c]]
+        boot_attr_cats = []
+    fallback_cats = [c for c in cats
+                     if c not in attr_cats and c not in boot_attr_cats]
 
     drafts: list[Label] = []
     proposals: list[dict] = []
@@ -486,6 +497,11 @@ def _judge(state: LabellingState) -> dict:
                 orch, state, seg, text, frames, attr_cats, cat_defs, cat_rule)
             drafts.extend(ad_drafts)
             proposals.extend(ad_props)
+
+        if boot_attr_cats:
+            drafts.extend(_judge_bootstrap_attrs(
+                orch, state, seg, text, frames, boot_attr_cats, cat_defs,
+                policies))
 
         if fallback_cats:
             fb_drafts, fb_props = _judge_holistic(
@@ -677,6 +693,94 @@ def _judge_pipeline(orch, state, seg, asr, frames, attr_cats, cat_defs, cat_rule
                               f"attributes {trajectories[cat]['extracted']}."),
             }})
     return labels, proposals
+
+
+def _build_bootstrap_label(seg, cat, score, rationale, cited, defs, idx,
+                           extracted) -> Label:
+    """STORE for the bootstrap attr path: one Label carrying the FULL extracted
+    attribute vector as `evidence_attributes` (like `_build_label`) plus a FREE
+    holistic score (no decision tree ran). Every defined attribute is
+    represented — extracted ones with value + evidence (source judge/extract),
+    ones the model dropped stored EMPTY (source judge/unselected). This label is
+    one CART training row: attribute vector -> score."""
+    evidence: list[Attribute] = []
+    for name in idx["names"]:
+        d = idx["def_by_name"][name]
+        o = extracted.get(name)
+        if o is not None:
+            evidence.append(Attribute(
+                key=name, value=_attr_value(o.get("value")),
+                layer=AttributeLayer.POLICY, source="judge/extract",
+                evidence=str(o.get("evidence") or "") or None,
+                policy_version=d.version))
+        else:
+            evidence.append(Attribute(
+                key=name, value="", layer=AttributeLayer.POLICY,
+                source="judge/unselected", evidence=None,
+                policy_version=d.version))
+    decision = {"category": cat, "mode": "bootstrap_free", "score": score,
+                "extracted": {n: o.get("value") for n, o in extracted.items()}}
+    return Label(
+        label_id="", segment_id=seg.segment_id, category=cat, score=score,
+        rationale=rationale, cited_policy_ids=cited, evidence_attributes=evidence,
+        tool_trace=[{"decision": decision}])
+
+
+def _judge_bootstrap_attrs(orch, state, seg, asr, frames, cats, cat_defs,
+                           policies):
+    """Bootstrap attribute path: EXTRACT every defined attribute (no SELECT — all
+    are extracted) then assign a FREE holistic score per category (one scoring
+    call, NOT the decision tree, which does not exist yet). The extracted vector
+    + free score become the CART training rows. Returns labels."""
+    idx_by_cat = {c: _attr_index(cat_defs[c]) for c in cats}
+
+    # EXTRACT — one call per category over ALL its attributes; display values feed
+    # the scoring call for grounding.
+    extracted_by_cat: dict[str, dict] = {}
+    display: list[Attribute] = []
+    for cat in cats:
+        idx = idx_by_cat[cat]
+        extracted = _extract_selected(
+            orch, state, seg, asr, frames, cat, idx, idx["names"])
+        extracted_by_cat[cat] = extracted
+        for n, o in extracted.items():
+            display.append(Attribute(
+                key=f"{cat}.{n}", value=_attr_value(o.get("value")),
+                layer=AttributeLayer.POLICY, source="judge/extract",
+                evidence=str(o.get("evidence") or "") or None))
+
+    # FREE holistic score across these categories, grounded in the extracted
+    # attributes (shown as policy_attributes). No precedents exist in bootstrap.
+    system = _JUDGE_SYS.format(cats=", ".join(cats))
+    policy_text = "\n".join(
+        f"- ({p.policy_id},v{p.version}) [{p.type.value}/{p.category.value}] {p.text}"
+        for p in policies if p.category.value in cats
+    ) or "none"
+    version_by_id = {p.policy_id: p.version for p in policies}
+    prompt = _judge_prompt(state, seg, asr, display, policy_text, [])
+    parsed = _parse_json(orch.judge(system, prompt, frames))
+    if parsed.get("need_more_frames") and frames:
+        more = agent_tools.expand_frames(seg, _FRAMES_PER_SHOT * 2)
+        parsed = _parse_json(orch.judge(system, prompt, more)) or parsed
+
+    judged: dict[str, dict] = {}
+    for j in parsed.get("judgements", []) or []:
+        c = j.get("category")
+        if c in cats and c not in judged:
+            judged[c] = j
+
+    labels: list[Label] = []
+    for cat in cats:
+        idx = idx_by_cat[cat]
+        j = judged.get(cat, {})
+        score = _clamp(j.get("score"))
+        rationale = (j.get("rationale", "") or "") or (
+            f"[{cat}] free bootstrap score {score} (no decision tree yet).")
+        cited = _normalise_pins(list(j.get("cited_policy_ids") or []), version_by_id)
+        labels.append(_build_bootstrap_label(
+            seg, cat, score, rationale, cited, cat_defs[cat], idx,
+            extracted_by_cat[cat]))
+    return labels
 
 
 def _judge_holistic(orch, state, seg, asr, frames, cats, policies, precedents,
