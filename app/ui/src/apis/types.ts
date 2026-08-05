@@ -151,6 +151,16 @@ export interface TrackedSegment {
   score: number;
 }
 
+// A representative example segment for an attribute value: keyframe (fetched
+// from /api/segments/{id}/keyframe) + its ingestion summary. See the attribute
+// examples endpoint.
+export interface AttributeExample {
+  segment_id: string;
+  video_id: string;
+  summary?: string | null;
+  score: number;
+}
+
 // Presentation-only Korean translation of a node's human-readable strings,
 // stored under structured_data.i18n.ko mirroring the English field structure
 // (#22). English stays authoritative; the UI falls back to English per-field

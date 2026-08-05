@@ -56,6 +56,24 @@ def get_segment(segment_id: str):
     return seg
 
 
+@router.get("/segments/{segment_id}/keyframe")
+def get_segment_keyframe(segment_id: str):
+    """One representative JPEG keyframe sampled from a segment's clip. Reuses the
+    labelling frame sampler (imported lazily to keep media/model deps off the
+    module import path). 404 if the segment or a decodable frame is missing."""
+    seg = storage.get_segment(segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail=f"unknown segment {segment_id}")
+    from labelling.tools import sample_frames
+
+    frames = sample_frames(seg, 1)
+    if not frames:
+        raise HTTPException(
+            status_code=404, detail=f"no keyframe for segment {segment_id}"
+        )
+    return Response(content=frames[0], media_type="image/jpeg")
+
+
 @router.get("/labels")
 def list_labels(segment_id: str | None = None):
     """Labels include their full trace (rationale, cited policies, tool_trace)."""

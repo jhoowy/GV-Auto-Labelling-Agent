@@ -87,3 +87,35 @@ def segments_for_attribute_value(
             },
         ).mappings()
         return [_seg_row(r["segment_id"], r["video_id"], r["score"]) for r in rows]
+
+
+def attribute_value_examples(
+    category: str, attribute: str, value: str, limit: int = 3,
+) -> list[dict]:
+    """Up to `limit` representative segments labelled with `attribute == value`,
+    each `{segment_id, video_id, summary, score}` — reuses
+    `segments_for_attribute_value` then reads each segment's ingestion `summary`
+    for display alongside a keyframe. Read-only. Empty value -> []."""
+    if value == "" or limit <= 0:
+        return []
+    segs = segments_for_attribute_value(category, attribute, value)[:limit]
+    if not segs:
+        return []
+    ids = [s["segment_id"] for s in segs]
+    sql = text(
+        "SELECT segment_id, summary FROM segments WHERE segment_id = ANY(:ids)"
+    )
+    with SessionLocal() as sess:
+        summaries = {
+            r["segment_id"]: r["summary"]
+            for r in sess.execute(sql, {"ids": ids}).mappings()
+        }
+    return [
+        {
+            "segment_id": s["segment_id"],
+            "video_id": s["video_id"],
+            "summary": summaries.get(s["segment_id"]),
+            "score": s["score"],
+        }
+        for s in segs
+    ]

@@ -3,12 +3,14 @@
 // with approve / reject actions.
 import { useEffect, useMemo, useState } from "react";
 import {
+  getAttributeValueExamples,
   getAttributeValueSegments,
   getPolicies,
   getRuleSegments,
   listChangeRequests,
   listPolicySets,
   resolveChangeRequest,
+  segmentKeyframeUrl,
   translatePolicies,
 } from "../../apis/client";
 import type {
@@ -475,6 +477,88 @@ function AttributeSchemaRow({
   );
 }
 
+// Up to 3 representative example segments (keyframe + summary) for one
+// attribute value, sourced from labelling data (#49). Fetched lazily — the
+// AttributeDetail only mounts for the selected attribute — and degrades to the
+// policy's static example strings (or nothing) when no labelled examples exist.
+function ValueExamples({
+  category,
+  attr,
+  value,
+  staticExamples,
+}: {
+  category: Category;
+  attr: string;
+  value: string;
+  staticExamples: string[];
+}) {
+  const { data, loading } = useAsync(
+    () => getAttributeValueExamples(category, attr, value),
+    [category, attr, value],
+  );
+  const examples = data ?? [];
+  if (loading) return <span className="muted">Loading examples…</span>;
+  if (examples.length === 0) {
+    return staticExamples.length > 0 ? (
+      <span>{staticExamples.join("; ")}</span>
+    ) : (
+      <span className="muted">—</span>
+    );
+  }
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      {examples.map((ex) => (
+        <a
+          key={ex.segment_id}
+          href={`/viewer/${encodeURIComponent(ex.video_id)}`}
+          title={ex.summary ?? ex.segment_id}
+          style={{
+            display: "flex",
+            gap: 6,
+            alignItems: "flex-start",
+            textDecoration: "none",
+            color: "inherit",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: 4,
+            background: "var(--panel)",
+          }}
+        >
+          <img
+            src={segmentKeyframeUrl(ex.segment_id)}
+            alt={`Keyframe for ${attr} = ${value}`}
+            loading="lazy"
+            width={72}
+            height={40}
+            // Hide a missing/undecodable keyframe; the summary still shows.
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+            style={{
+              width: 72,
+              height: 40,
+              objectFit: "cover",
+              borderRadius: 4,
+              flex: "0 0 auto",
+              background: "var(--border)",
+            }}
+          />
+          <span
+            style={{
+              display: "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {ex.summary || "(no summary)"}
+          </span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 // RIGHT: the selected attribute's full detail — guidelines + a values table
 // (value · label · description · per-value rules · examples), EN/KO applied.
 // Clicking a value tracks its labelled segments (#14) inline below the table.
@@ -624,7 +708,15 @@ function AttributeDetail({
                     </td>
                     <td className="small muted">
                       <div className="attr-cell-scroll">
-                        {ex.map((e: any) => String(e)).join("; ")}
+                        {/* #49: representative example segments (keyframe +
+                            summary) from labelling data; falls back to the
+                            policy's static example strings. */}
+                        <ValueExamples
+                          category={category}
+                          attr={attr}
+                          value={valStr}
+                          staticExamples={ex.map((e: any) => String(e))}
+                        />
                       </div>
                     </td>
                   </tr>
