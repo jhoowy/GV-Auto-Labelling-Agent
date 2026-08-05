@@ -8,6 +8,7 @@ ingestion:
   # Omni scene segmentation windows (overlap + reconcile).
   omni_window_seconds: 90
   omni_overlap_seconds: 15
+  max_segment_seconds: 30      # cap shot length; longer segments split into equal pieces (<=0 disables) — #60
 
 labelling:
   # Shot-window sequential processing.

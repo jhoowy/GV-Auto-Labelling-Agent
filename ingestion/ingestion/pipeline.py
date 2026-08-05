@@ -137,9 +137,47 @@ async def _asr_utterances(video_id, media, duration, win_s, asr,
     return utts
 
 
-async def _omni_segments(media, duration, W, O, omni) -> list[dict]:
+def _cap_and_fill(final: list[dict], duration: float, max_seconds: float) -> list[dict]:
+    """Pure bound-transform on segment dicts (no Omni/DB) — unit-testable.
+
+    (1) Make the list fully contiguous 0..duration: each segment starts exactly
+    where the previous ended (0 for the first), filling any coverage gap, and the
+    tail is forced to reach ``duration``. (2) Cap: split any segment longer than
+    ``max_seconds`` into ceil(d/max) equal-ish contiguous pieces (each <= max).
+    ``max_seconds`` <= 0 disables the cap. Summaries carry through.
+    """
+    if not final:
+        return []
+    # 1) Contiguity: extend each start back to the previous end, filling gaps.
+    contig: list[dict] = []
+    cover = 0.0
+    for seg in final:
+        contig.append({"t_start": cover, "t_end": seg["t_end"], "summary": seg["summary"]})
+        cover = seg["t_end"]
+    contig[-1]["t_end"] = duration
+    # 2) Cap: split over-long segments into equal-ish pieces (each <= max).
+    if max_seconds <= 0:
+        return contig
+    out: list[dict] = []
+    for seg in contig:
+        a, b = seg["t_start"], seg["t_end"]
+        d = b - a
+        if d <= max_seconds:
+            out.append(seg)
+            continue
+        k = ceil(d / max_seconds)
+        piece = d / k
+        for j in range(k):
+            ps = a + j * piece
+            pe = b if j == k - 1 else a + (j + 1) * piece  # exact tail avoids drift
+            out.append({"t_start": ps, "t_end": pe, "summary": seg["summary"]})
+    return out
+
+
+async def _omni_segments(media, duration, W, O, omni, max_seconds: float = 30.0) -> list[dict]:
     """Overlapping-window segmentation with per-overlap reconcile. Returns a
-    contiguous list of {t_start, t_end, summary}."""
+    contiguous list of {t_start, t_end, summary}, gap-free from 0 to ``duration``
+    with every segment capped at ``max_seconds``."""
     step = max(W - O, 1.0)
     starts, s = [], 0.0
     while s < duration:
@@ -172,8 +210,11 @@ async def _omni_segments(media, duration, W, O, omni) -> list[dict]:
 
     def _append(seg):
         cover = final[-1]["t_end"] if final else 0.0
+        # Start at ``cover`` (prev end, or 0) — extend back to fill any gap so the
+        # list stays contiguous; a scene starting after ``cover`` no longer leaves
+        # [cover, scene_start) uncovered.
         if seg["t_end"] > cover + 0.5:
-            final.append({"t_start": max(seg["t_start"], cover), "t_end": seg["t_end"],
+            final.append({"t_start": cover, "t_end": seg["t_end"],
                           "summary": seg["summary"]})
 
     for i in range(n):
@@ -196,7 +237,7 @@ async def _omni_segments(media, duration, W, O, omni) -> list[dict]:
                 _append({"t_start": r["start"], "t_end": r["end"], "summary": r["summary"]})
     if final:
         final[-1]["t_end"] = duration
-    return final
+    return _cap_and_fill(final, duration, max_seconds)
 
 
 def _base_attributes(summary: str | None, asr_text: str, t_start: float, t_end: float) -> list[Attribute]:
@@ -266,7 +307,8 @@ async def ingest_video(video_id: str, concurrency: int = 8) -> Video:
     lang = _asr_language(_video_language(video_id))
     utts = await _asr_utterances(video_id, media, duration, cfg["asr_window_seconds"], asr, lang)
     bounds = await _omni_segments(media, duration, cfg["omni_window_seconds"],
-                                  cfg["omni_overlap_seconds"], omni)
+                                  cfg["omni_overlap_seconds"], omni,
+                                  float(cfg.get("max_segment_seconds", 30)))
     segments = await _build_segments(video_id, media, bounds, utts, temb, vemb, sem)
 
     if segments:
