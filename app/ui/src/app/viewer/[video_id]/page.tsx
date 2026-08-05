@@ -3,8 +3,8 @@
 // score) + a per-segment panel with summary, transcript, per-category labels,
 // and a collapsible raw tool_trace.
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { getVideo, listLabels, listSegments } from "../../../apis/client";
 import type { Label, Segment } from "../../../apis/types";
 import { useAsync } from "../../../lib/useAsync";
@@ -42,11 +42,22 @@ async function loadVideoData(videoId: string): Promise<Loaded> {
 const maxScore = (labels: Label[]): number | null =>
   labels.length ? Math.max(...labels.map((l) => l.score)) : null;
 
+// `useSearchParams` requires a Suspense boundary in the app router; wrap the
+// client body so a static build doesn't error on it.
 export default function VideoDetail() {
+  return (
+    <Suspense fallback={<div className="state">Loading…</div>}>
+      <VideoDetailInner />
+    </Suspense>
+  );
+}
+
+function VideoDetailInner() {
   const params = useParams<{ video_id: string }>();
   const videoId = decodeURIComponent(
     Array.isArray(params.video_id) ? params.video_id[0] : params.video_id,
   );
+  const searchParams = useSearchParams();
 
   const video = useAsync(() => getVideo(videoId), [videoId]);
   const data = useAsync(() => loadVideoData(videoId), [videoId]);
@@ -55,6 +66,29 @@ export default function VideoDetail() {
   const segments = data.data?.segments ?? [];
   const labelsBySeg = data.data?.labelsBySeg ?? {};
   const selectedSeg = segments.find((s) => s.segment_id === selected) ?? null;
+
+  // Deep-link: `?segment=<id>` pre-selects that segment once segments load, so
+  // the timeline highlights it and the player seeks to its start. `?t=<seconds>`
+  // is a fallback that seeks without pinning a specific segment.
+  const segParam = searchParams.get("segment");
+  const tParam = searchParams.get("t");
+  useEffect(() => {
+    if (selected == null && segParam && segments.some((s) => s.segment_id === segParam)) {
+      setSelected(segParam);
+    }
+  }, [segParam, segments, selected]);
+
+  // Start offset (seconds) the embed plays from: the selected segment's start,
+  // else the `?t=` fallback, else none (plain embed, no autoplay).
+  const startAt =
+    selectedSeg != null
+      ? Math.floor(selectedSeg.t_start)
+      : selected == null && tParam != null && Number.isFinite(Number(tParam))
+        ? Math.max(0, Math.floor(Number(tParam)))
+        : null;
+  const embedBase = `https://www.youtube.com/embed/${encodeURIComponent(videoId)}`;
+  const embedSrc =
+    startAt != null ? `${embedBase}?start=${startAt}&autoplay=1` : embedBase;
 
   const title = video.data?.metadata?.title ?? videoId;
 
@@ -81,8 +115,11 @@ export default function VideoDetail() {
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ position: "relative", width: "100%", aspectRatio: "16 / 9" }}>
           <iframe
+            // Key on the start offset so a new selection forces a reload and the
+            // player actually seeks (query-param changes alone don't re-navigate).
+            key={startAt ?? "none"}
             title={title}
-            src={`https://www.youtube.com/embed/${encodeURIComponent(videoId)}`}
+            src={embedSrc}
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }}
