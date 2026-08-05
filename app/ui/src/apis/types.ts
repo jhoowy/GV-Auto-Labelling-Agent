@@ -116,9 +116,14 @@ export interface DecisionRule {
   when: DecisionRuleCond[];
   score: number;
   note?: string;
-  // Short human sentence shown as the rule node's primary text (#55). EN is
-  // authoritative; description_ko is the Korean rendering. Both optional — a
-  // companion change populates them; the UI falls back to a condition summary.
+  // Short title (~3-6 words) shown as the rule node's primary text (#64). EN is
+  // authoritative; title_ko is the Korean rendering. Optional — the UI falls
+  // back to a compact condition summary when absent.
+  title?: string;
+  title_ko?: string;
+  // Full human sentence shown in the click-reveal detail, not on the node (#64).
+  // EN authoritative; description_ko is the Korean rendering. Both optional — a
+  // companion change populates them.
   description?: string;
   description_ko?: string;
 }

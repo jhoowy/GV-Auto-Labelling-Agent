@@ -206,18 +206,16 @@ function fmtCond(c: any): string {
   return c?.op === "present" ? head : `${head} ${fmtValue(c?.value)}`;
 }
 
-// Compact one-line summary of a rule's conditions — the node fallback when a
-// rule has no human `description`, and the sub-label under the reveal.
-function condSummary(rule: any): string {
+// The rule node's primary text: its SHORT title (KO when active + present),
+// else a COMPACT condition summary (first 1-2 predicates) — never the long
+// description, which is reserved for the click-reveal detail (#64).
+function ruleTitle(lang: Lang, rule: any): string {
+  const t = tr(lang, rule?.title_ko, rule?.title);
+  if (t) return t;
   const conds: any[] = Array.isArray(rule?.when) ? rule.when : [];
   if (conds.length === 0) return "always";
-  return conds.map(fmtCond).join("; ");
-}
-
-// The rule node's primary text: its human sentence (KO when active + present),
-// else a compact condition summary so a node always shows something (#55).
-function ruleText(lang: Lang, rule: any): string {
-  return tr(lang, rule?.description_ko, rule?.description) || condSummary(rule);
+  const head = conds.slice(0, 2).map(fmtCond).join("; ");
+  return conds.length > 2 ? `${head}; …` : head;
 }
 
 // Mirrors the aggregator cap (tools/tracking.RESULT_CAP): a full page means
@@ -445,9 +443,9 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
   );
 }
 
-// Reveal panel for a clicked rule node: its full `when` conditions (attribute ·
-// op · value) + resulting score. Mirrors dt-labeling's policy-edit reveal; the
-// description shown on the node is expanded here into the exact predicate list.
+// Reveal panel for a clicked rule node: the full DESCRIPTION (the long text the
+// node's short title stands in for, #64) above the exact `when` conditions
+// (attribute · op · value) + resulting score. KO applies per the language toggle.
 function RuleConditions({
   rule,
   index,
@@ -462,10 +460,11 @@ function RuleConditions({
   return (
     <div className="card dt-reveal-card">
       <div className="row spread">
-        <strong className="small">Rule #{index + 1} conditions</strong>
+        <strong className="small">Rule #{index + 1}</strong>
         <ScoreBadge score={Number(rule?.score ?? 0)} />
       </div>
-      {desc && <p className="small" style={{ margin: "6px 0 0" }}>{desc}</p>}
+      {/* Full description — reserved for this reveal; the node only shows the title. */}
+      {desc && <p className="dt-reveal-desc small">{desc}</p>}
       {conds.length === 0 ? (
         <div className="muted small" style={{ marginTop: 6 }}>
           Always matches (no conditions).
@@ -813,10 +812,11 @@ const DT = {
   LEAF_H: 66,
 };
 
-// Node height from its wrapped description text (~46 chars/line at RULE_W).
+// Node height from its wrapped title text (~40 chars/line at RULE_W). Titles are
+// short (~3-6 words), so a single-line title yields a compact minimum height.
 function ruleHeight(text: string): number {
-  const lines = Math.max(1, Math.ceil((text.length || 1) / 46));
-  return Math.max(64, 30 + lines * 18 + 12);
+  const lines = Math.max(1, Math.ceil((text.length || 1) / 40));
+  return Math.max(52, 26 + lines * 18);
 }
 
 const vPath = (x1: number, y1: number, x2: number, y2: number) => {
@@ -886,9 +886,10 @@ function LeafNode({
   );
 }
 
-// A rule node shows a short DESCRIPTION as its primary text (not the raw
-// conditions) — the exact `when` predicates are revealed on click (#55). `text`
-// is the description (or its condition-summary fallback), resolved by caller.
+// A rule node shows a short TITLE as its primary text (not the long
+// description or raw conditions) — the full description and the exact `when`
+// predicates are revealed on click (#64). `text` is the title (or its compact
+// condition-summary fallback), resolved by the caller.
 function RuleNode({
   x,
   y,
@@ -953,8 +954,8 @@ function DecisionTreeDiagram({
     ? ko.rules
     : [];
 
-  // Each node's primary text: description (KO-aware) or condition-summary fallback.
-  const texts = rules.map((r) => ruleText(lang, r));
+  // Each node's primary text: short title (KO-aware) or condition-summary fallback.
+  const texts = rules.map((r) => ruleTitle(lang, r));
 
   const ruleX = DT.MARGIN;
   const leafX = ruleX + DT.RULE_W + DT.COL_GAP;
@@ -1053,7 +1054,8 @@ function DecisionTreeDiagram({
               y={defaultY}
               score={def}
               label="default"
-              note={tr(lang, ko?.default_note, "no rule matched")}
+              // Short default title if the policy provides one (#64), else the note.
+              note={tr(lang, ko?.default_title ?? ko?.default_note, (sd as any)?.default_title ?? "no rule matched")}
             />
             {pos.map((p, i) => (
               <RuleNode
@@ -1072,9 +1074,9 @@ function DecisionTreeDiagram({
         )}
       </div>
       <div className="muted small" style={{ marginTop: 6 }}>
-        Nodes show a short description — click a rule node to reveal its exact
-        conditions, highlight the attributes it reads, and list the segments it
-        labelled.
+        Nodes show a short title — click a rule node to reveal its full
+        description and exact conditions, highlight the attributes it reads, and
+        list the segments it labelled.
       </div>
     </div>
   );
