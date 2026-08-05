@@ -259,8 +259,10 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
     : [];
 
   // Attribute nodes drive the master-detail block: the LEFT lists them as a
-  // schema at a glance, the RIGHT shows the selected one's full detail.
-  const attrNodes = roots.filter((n) => n.type === "attribute");
+  // schema at a glance, the RIGHT shows the selected one's full detail. Use the
+  // FLAT list, not `roots` — attribute nodes are children of the scoring node
+  // (parent_id = `{cat}.scoring`), so they never appear as tree roots.
+  const attrNodes = flat.filter((n) => n.type === "attribute");
 
   // Which attribute's detail the right panel shows.
   const [selectedAttr, setSelectedAttr] = useState<string | null>(null);
@@ -326,7 +328,10 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
         {/* Scoring rubric + edge-case rules stay as plain node cards. */}
         <div className="grid" style={{ gap: 16 }}>
           {TYPE_GROUPS.filter((g) => g.type !== "attribute").map((g) => {
-            const groupNodes = roots.filter((n) => n.type === g.type);
+            // Render from the FLAT list so the scoring node shows only its own
+            // text — not its nested attribute children (those are the master-
+            // detail block below). `flat` nodes carry no `children`.
+            const groupNodes = flat.filter((n) => n.type === g.type);
             if (groupNodes.length === 0) return null;
             return (
               <div key={g.type}>
@@ -339,9 +344,14 @@ function PolicyTreeSection({ category, lang }: { category: Category; lang: Lang 
               </div>
             );
           })}
-          {/* any roots whose type isn't a known group */}
-          {roots
-            .filter((n) => !TYPE_GROUPS.some((g) => g.type === n.type))
+          {/* any node whose type isn't a known group (excl. the decision_rule,
+              which renders as the tree diagram below) */}
+          {flat
+            .filter(
+              (n) =>
+                !TYPE_GROUPS.some((g) => g.type === n.type) &&
+                n.type !== "decision_rule",
+            )
             .map((n) => (
               <PolicyNode key={n.policy_id} node={n} depth={0} />
             ))}
