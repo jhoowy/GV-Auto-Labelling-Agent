@@ -100,6 +100,40 @@ def segments_for_rule(category: str, rule_index: int) -> list[dict]:
     return out
 
 
+def leaf_segments(
+    category: str, rule_index: int, limit: int = 5,
+) -> list[dict]:
+    """Up to `limit` segments matching decision-tree rule `rule_index`, each
+    enriched for agent inspection: `{segment_id, video_id, score, summary,
+    keyframe_url}`. Reuses `segments_for_rule` (re-derives the fired rule from
+    each label's evidence) then reads each segment's ingestion `summary` and
+    attaches the keyframe endpoint reference. Read-only. limit <= 0 -> []."""
+    if limit <= 0:
+        return []
+    segs = segments_for_rule(category, rule_index)[:limit]
+    if not segs:
+        return []
+    ids = [s["segment_id"] for s in segs]
+    sql = text(
+        "SELECT segment_id, summary FROM segments WHERE segment_id = ANY(:ids)"
+    )
+    with SessionLocal() as sess:
+        summaries = {
+            r["segment_id"]: r["summary"]
+            for r in sess.execute(sql, {"ids": ids}).mappings()
+        }
+    return [
+        {
+            "segment_id": s["segment_id"],
+            "video_id": s["video_id"],
+            "score": s["score"],
+            "summary": summaries.get(s["segment_id"]),
+            "keyframe_url": f"/api/segments/{s['segment_id']}/keyframe",
+        }
+        for s in segs
+    ]
+
+
 def rule_segment_counts(category: str) -> dict[int, int]:
     """Per-rule count of segments matching each decision-tree rule of `category`.
 
