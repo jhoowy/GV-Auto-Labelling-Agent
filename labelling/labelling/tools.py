@@ -3,7 +3,7 @@ add no business logic, only expose service functions to the orchestrator and
 record into tool_trace.
 
   Retrieval:  search_policies, find_similar_segments, lookup_structured,
-              get_leaf_segments
+              get_leaf_segments, simulate_rule_change
   Context:    expand_window, get_frames, get_video_overview
   Mutation:   revise_ingestion, propose_policy_change, emit_label
   External:   web_search
@@ -49,6 +49,23 @@ def get_leaf_segments(category: str, rule_index: int, limit: int = 5):
     """
     from tools import tracking
     return tracking.leaf_segments(category, rule_index, limit)
+
+
+def simulate_rule_change(category: str, op: dict,
+                         scope: str = "bootstrap_train"):
+    """Preview a decision-tree rule change's metric impact before proposing it.
+
+    Given a NODE op (`{op, rule_index, when, score, note}` — the same shape
+    `propose_policy_change`/SIDE_FX would carry), re-scores the category's labels
+    in `scope` (a `metadata_json.split`; default `bootstrap_train`, or `"all"`)
+    under both the current and the modified tree and returns a compact before/after
+    summary: `n_segments`, `current_score_dist`/`new_score_dist`, `n_changed` (+ a
+    few `changed_examples`), and GT agreement before/after. Purely read-only (the
+    tree is NOT written) — use it to sanity-check a rule change's impact before
+    committing it via a SIDE_FX `propose_policy_change`.
+    """
+    from tools import simulate
+    return simulate.simulate_rule_change(category, op, scope)
 
 
 def define_structured_attribute(category: str, name: str,

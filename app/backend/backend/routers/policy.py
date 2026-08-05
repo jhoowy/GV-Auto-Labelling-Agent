@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from tools import db_browser, policy_store, tracking, translate
+from pydantic import BaseModel
+
+from tools import db_browser, policy_store, simulate, tracking, translate
 
 router = APIRouter(prefix="/api", tags=["policy"])
 
@@ -36,6 +38,23 @@ def rule_counts(category: str):
     if -1 in counts:
         out["default"] = counts[-1]
     return out
+
+
+class SimulateBody(BaseModel):
+    """A what-if decision-tree rule change: the NODE `op`
+    (`{op, rule_index, when, score, note}`) plus an optional label `scope`."""
+    op: dict
+    scope: str = "bootstrap_train"
+
+
+@router.post("/policies/{category}/simulate")
+def simulate_rule_change(category: str, body: SimulateBody):
+    """Preview a decision-tree rule change's metric impact WITHOUT committing it.
+
+    Re-scores the category's labels in `scope` under the current vs. the modified
+    tree and returns the before/after summary (score-dist delta, `n_changed` +
+    examples, GT agreement) so a reviewer can gauge impact before approving."""
+    return simulate.simulate_rule_change(category, body.op, body.scope)
 
 
 @router.get("/policies/{category}/attribute/{name}/segments")
