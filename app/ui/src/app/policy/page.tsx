@@ -477,10 +477,12 @@ function AttributeSchemaRow({
   );
 }
 
-// Up to 3 representative example segments (keyframe + summary) for one
-// attribute value, sourced from labelling data (#49). Fetched lazily — the
-// AttributeDetail only mounts for the selected attribute — and degrades to the
-// policy's static example strings (or nothing) when no labelled examples exist.
+// The examples cell for one attribute value, split into two labelled areas:
+//   • "Examples"        — the policy's static example strings (as before).
+//   • "Example segments" — up to 3 labelling-derived segments (#49), rendered
+//     as thumbnail-only deep links to the exact segment in the Data Viewer.
+// The labelling examples are fetched lazily (the AttributeDetail only mounts for
+// the selected attribute); the segments area hides entirely when none exist.
 function ValueExamples({
   category,
   attr,
@@ -497,64 +499,51 @@ function ValueExamples({
     [category, attr, value],
   );
   const examples = data ?? [];
-  if (loading) return <span className="muted">Loading examples…</span>;
-  if (examples.length === 0) {
-    return staticExamples.length > 0 ? (
-      <span>{staticExamples.join("; ")}</span>
-    ) : (
-      <span className="muted">—</span>
-    );
-  }
+  const hasStatic = staticExamples.length > 0;
   return (
-    <div style={{ display: "grid", gap: 6 }}>
-      {examples.map((ex) => (
-        <a
-          key={ex.segment_id}
-          href={`/viewer/${encodeURIComponent(ex.video_id)}`}
-          title={ex.summary ?? ex.segment_id}
-          style={{
-            display: "flex",
-            gap: 6,
-            alignItems: "flex-start",
-            textDecoration: "none",
-            color: "inherit",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: 4,
-            background: "var(--panel)",
-          }}
-        >
-          <img
-            src={segmentKeyframeUrl(ex.segment_id)}
-            alt={`Keyframe for ${attr} = ${value}`}
-            loading="lazy"
-            width={72}
-            height={40}
-            // Hide a missing/undecodable keyframe; the summary still shows.
-            onError={(e) => {
-              e.currentTarget.style.display = "none";
-            }}
-            style={{
-              width: 72,
-              height: 40,
-              objectFit: "cover",
-              borderRadius: 4,
-              flex: "0 0 auto",
-              background: "var(--border)",
-            }}
-          />
-          <span
-            style={{
-              display: "-webkit-box",
-              WebkitLineClamp: 3,
-              WebkitBoxOrient: "vertical",
-              overflow: "hidden",
-            }}
-          >
-            {ex.summary || "(no summary)"}
-          </span>
-        </a>
-      ))}
+    <div>
+      {/* Static policy examples. */}
+      <div className="ex-section">
+        <div className="ex-label">Examples</div>
+        {hasStatic ? (
+          <span>{staticExamples.join("; ")}</span>
+        ) : (
+          <span className="muted">—</span>
+        )}
+      </div>
+      {/* Labelling-derived example segments: thumbnail-only deep links. */}
+      <div className="ex-section">
+        <div className="ex-label">Example segments</div>
+        {loading ? (
+          <span className="muted">Loading…</span>
+        ) : examples.length === 0 ? (
+          <span className="muted">—</span>
+        ) : (
+          <div className="ex-seg-grid">
+            {examples.map((ex) => (
+              <a
+                key={ex.segment_id}
+                // Deep-link to the exact segment; the viewer seeks to its start.
+                href={`/viewer/${encodeURIComponent(ex.video_id)}?segment=${encodeURIComponent(ex.segment_id)}`}
+                title={ex.summary ?? ex.segment_id}
+              >
+                <img
+                  className="ex-seg-thumb"
+                  src={segmentKeyframeUrl(ex.segment_id)}
+                  alt={`Keyframe for ${attr} = ${value}`}
+                  loading="lazy"
+                  width={72}
+                  height={40}
+                  // Hide a missing/undecodable keyframe.
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                  }}
+                />
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
