@@ -33,6 +33,14 @@ def attribute_segments(category: str, name: str, value: str):
     return tracking.segments_for_attribute_value(category, name, value)
 
 
+@router.get("/policies/{category}/attribute/{name}/examples")
+def attribute_examples(category: str, name: str, value: str, limit: int = 3):
+    """Up to `limit` representative example segments labelled with attribute
+    `name == value` — each with its ingestion summary — for the attribute-detail
+    panel. Keyframes come from GET /api/segments/{segment_id}/keyframe."""
+    return tracking.attribute_value_examples(category, name, value, limit)
+
+
 @router.get("/policy-sets")
 def list_policy_sets():
     """Policy-set snapshots, newest version first."""

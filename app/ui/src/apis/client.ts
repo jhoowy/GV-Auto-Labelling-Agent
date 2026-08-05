@@ -3,6 +3,7 @@
 // NEXT_PUBLIC_API_BASE (default http://localhost:8000).
 
 import type {
+  AttributeExample,
   DbTable,
   DbTablePage,
   Label,
@@ -122,6 +123,24 @@ export const getAttributeValueSegments = (
       name,
     )}/segments${qs({ value })}`,
   );
+
+// Up to `limit` representative example segments (keyframe + summary) for an
+// attribute value, sourced from labelling data.
+export const getAttributeValueExamples = (
+  category: string,
+  name: string,
+  value: string,
+  limit = 3,
+) =>
+  api<AttributeExample[]>(
+    `/api/policies/${encodeURIComponent(category)}/attribute/${encodeURIComponent(
+      name,
+    )}/examples${qs({ value, limit })}`,
+  );
+
+// Absolute URL of one representative keyframe JPEG for a segment (an <img> src).
+export const segmentKeyframeUrl = (segmentId: string) =>
+  `${BASE}/api/segments/${encodeURIComponent(segmentId)}/keyframe`;
 
 // ---- DB browser ----------------------------------------------------------
 export const listDbTables = () => api<DbTable[]>(`/api/db/tables`);
