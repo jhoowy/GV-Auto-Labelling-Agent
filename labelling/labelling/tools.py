@@ -2,7 +2,8 @@
 add no business logic, only expose service functions to the orchestrator and
 record into tool_trace.
 
-  Retrieval:  search_policies, find_similar_segments, lookup_structured
+  Retrieval:  search_policies, find_similar_segments, lookup_structured,
+              get_leaf_segments
   Context:    expand_window, get_frames, get_video_overview
   Mutation:   revise_ingestion, propose_policy_change, emit_label
   External:   web_search
@@ -34,6 +35,20 @@ def find_similar_segments(segment: Segment, top_k: int = 5):
 def lookup_structured(ref: str, text: str) -> bool:
     from tools import retrieval
     return retrieval.lookup_structured(ref, text)
+
+
+def get_leaf_segments(category: str, rule_index: int, limit: int = 5):
+    """Precedent segments for one decision-tree leaf/rule (node inspection).
+
+    Given a category's decision-tree rule index, returns up to `limit` segments
+    whose confirmed labels fired that rule, each enriched as
+    `{segment_id, video_id, score, summary, keyframe_url}`. Lets the agent
+    inspect a leaf during JUDGE/REVIEW — read the summaries and pull each
+    keyframe via `keyframe_url` (GET /api/segments/{id}/keyframe) — to see the
+    precedent a rule already sets before scoring against it.
+    """
+    from tools import tracking
+    return tracking.leaf_segments(category, rule_index, limit)
 
 
 def define_structured_attribute(category: str, name: str,
