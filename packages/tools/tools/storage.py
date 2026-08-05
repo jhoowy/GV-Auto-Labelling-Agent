@@ -179,14 +179,26 @@ def list_videos_page(
     page: int = 1,
     page_size: int = 24,
     dataset: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    score_min: int | None = None,
+    score_max: int | None = None,
 ) -> dict:
     """Paginated video cards for the gallery view.
 
     Each item carries the title (from metadata_json), duration, status and the
     segment count. `search` is a case-insensitive substring match on the title.
     `dataset` filters on metadata_json->>'dataset' (None = all datasets).
+
+    `status` filters on the labelling lifecycle derived from segments/labels
+    (not the video row's own status column): 'ingested' = has >=1 segment;
+    'labelled' = has >=1 label via its segments; 'unlabelled' = has segments but
+    no labels. `category` + `score_min`/`score_max` keep videos with >=1 label in
+    that category whose score falls in the (inclusive) range; when only one bound
+    is given the other defaults to 0/5, and a bare `category` matches any score.
+    All filters compose SQL-side and `total` respects them.
     """
-    from sqlalchemy import func
+    from sqlalchemy import and_, func
 
     with SessionLocal() as s:
         seg_counts = (
@@ -204,6 +216,46 @@ def list_videos_page(
             q = q.filter(m.Video.metadata_json["title"].astext.ilike(f"%{search}%"))
         if dataset:
             q = q.filter(m.Video.metadata_json["dataset"].astext == dataset)
+
+        # Lifecycle status via EXISTS over segments/labels (not the video's own
+        # status column). A label is tied to a video through its segment.
+        has_segment = (
+            s.query(m.Segment.segment_id)
+            .filter(m.Segment.video_id == m.Video.video_id)
+            .exists()
+        )
+        has_label = (
+            s.query(m.Label.label_id)
+            .join(m.Segment, m.Label.segment_id == m.Segment.segment_id)
+            .filter(m.Segment.video_id == m.Video.video_id)
+            .exists()
+        )
+        if status == "ingested":
+            q = q.filter(has_segment)
+        elif status == "labelled":
+            q = q.filter(has_label)
+        elif status == "unlabelled":
+            q = q.filter(has_segment, ~has_label)
+
+        # Category + score-range: keep videos with a matching label. A bare
+        # category matches any score; otherwise clamp the range to [0, 5].
+        if category:
+            label_match = (
+                s.query(m.Label.label_id)
+                .join(m.Segment, m.Label.segment_id == m.Segment.segment_id)
+                .filter(
+                    m.Segment.video_id == m.Video.video_id,
+                    m.Label.category == category,
+                )
+            )
+            if score_min is not None or score_max is not None:
+                lo = score_min if score_min is not None else 0
+                hi = score_max if score_max is not None else 5
+                label_match = label_match.filter(
+                    and_(m.Label.score >= lo, m.Label.score <= hi)
+                )
+            q = q.filter(label_match.exists())
+
         q = q.order_by(m.Video.video_id)
         total = q.count()
         rows = q.offset((page - 1) * page_size).limit(page_size).all()
