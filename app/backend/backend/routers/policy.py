@@ -27,6 +27,17 @@ def rule_segments(category: str, rule_index: int):
     return tracking.segments_for_rule(category, rule_index)
 
 
+@router.get("/policies/{category}/rule-counts")
+def rule_counts(category: str):
+    """Per-rule count of segments matching each decision-tree rule of `category`
+    (rule index -> count, plus a `default` bucket) for the tree-node badges."""
+    counts = tracking.rule_segment_counts(category)
+    out: dict[str, int] = {str(i): n for i, n in counts.items() if i >= 0}
+    if -1 in counts:
+        out["default"] = counts[-1]
+    return out
+
+
 @router.get("/policies/{category}/attribute/{name}/segments")
 def attribute_segments(category: str, name: str, value: str):
     """Segments whose label recorded attribute `name == value` for `category`."""

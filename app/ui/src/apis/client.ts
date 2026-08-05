@@ -121,6 +121,13 @@ export const getRuleSegments = (category: string, ruleIndex: number) =>
     `/api/policies/${encodeURIComponent(category)}/rule/${ruleIndex}/segments`,
   );
 
+// Per-rule matching-segment counts for a category's decision tree, keyed by
+// rule index (as a string) plus a `default` bucket. Drives the tree-node badges.
+export const getRuleCounts = (category: string) =>
+  api<Record<string, number>>(
+    `/api/policies/${encodeURIComponent(category)}/rule-counts`,
+  );
+
 export const getAttributeValueSegments = (
   category: string,
   name: string,
